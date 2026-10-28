@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from clausepay.contract_store import JsonContractStore
 from clausepay.deed import Deed
 from clausepay.paypal_client import PayPalClient
+from clausepay.pdf_renderer import PdfRenderer
 
 load_dotenv()
 
@@ -48,6 +49,19 @@ def demo_store():
     store.delete(deed.deed_id)
 
 
+def demo_pdf():
+    blocks = [
+        {"type": "heading", "text": "What you received"},
+        {"type": "paragraph", "text": "You received $156.00. Of $630 in sales, $30 went to PayPal fees "
+                                      "and $60 was held back."},
+        {"type": "table", "header": ["Step", "Amount"],
+         "rows": [["Sales", "$630.00"], ["PayPal fees", "-$30.00"], ["Held back (10%)", "-$60.00"]]},
+    ]
+    path = PdfRenderer().render("Alice - Week 2 statement", blocks, "output/example.pdf")
+    print("wrote:", path)
+
+
 if __name__ == "__main__":
     # demo_paypal()  # sends a real sandbox payout each time, so it is commented out
-    demo_store()
+    # demo_store()
+    demo_pdf()
