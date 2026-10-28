@@ -60,9 +60,17 @@
   <section id="step-result" class="hidden">
     <h2>3. Refined contract</h2>
     <p id="summary"></p>
-    <table id="terms"></table>
+    <ol id="rules"></ol>
     <details><summary>Raw JSON</summary><pre id="raw"></pre></details>
     <p class="sub" id="deed-id"></p>
+  </section>
+
+  <section id="step-payees" class="hidden">
+    <h2>4. Who gets paid</h2>
+    <p class="sub">Enter the PayPal email for everyone the contract pays.</p>
+    <div id="payees"></div>
+    <div class="row"><button class="primary" id="save-payees">Save payees</button></div>
+    <p id="payees-saved"></p>
   </section>
 
   <div class="row"><button id="reset" class="hidden">Start over</button></div>
@@ -101,9 +109,14 @@ function render(deed) {
   show("step-input", false);
   show("reset", true);
   show("step-questions", deed.status === "clarifying");
-  show("step-result", deed.status === "refined");
+  const refined = deed.status === "refined" || deed.status === "payees_collected";
+  show("step-result", refined);
+  show("step-payees", refined);
   if (deed.status === "clarifying") renderQuestions(deed.questions);
-  if (deed.status === "refined") renderResult(deed);
+  if (refined) {
+    renderResult(deed);
+    renderPayees(deed);
+  }
 }
 
 function renderQuestions(questions) {
@@ -139,42 +152,38 @@ function renderQuestions(questions) {
   }
 }
 
-const money = n => "$" + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const who = v => v === "pool" ? "Taken off the top (shared pool)" : v === "each_recipient" ? "Each recipient pays their own" : v;
-const words = v => v.replaceAll("_", " ");
-
 function renderResult(deed) {
   const c = deed.refined_contract;
   $("summary").textContent = c.summary;
-  const rows = [
-    ["People", c.parties.join(", ")],
-    ["PayPal fee", who(c.paypal_fee_bearer)],
-    ["Fee PayPal doesn't return on refunds", who(c.unreturned_refund_fee_bearer)],
-    ["Payout fees", who(c.payout_fee_bearer)],
-    ["Holdback", c.holdback
-      ? `${c.holdback.percent}% for ${c.holdback.days} days, worked out ${words(c.holdback.calculated_on)}; on release: ${words(c.holdback.release_order)}`
-      : "None"],
-    ["Refunds", `Paid from ${words(c.refunds.funded_from)}; any shortfall covered by ${c.refunds.shortfall_covered_by === "single_party" ? c.refunds.shortfall_party : "the split percentages"}`],
-    ["Recoupment", c.recoupment
-      ? `${c.recoupment.party} gets ${c.recoupment.party_share_percent}% until ${money(c.recoupment.amount)} is repaid`
-      : "None"],
-  ];
-  c.splits.forEach((t, i) => {
-    const shares = t.shares.map(s => `${s.party} ${s.percent}%`).join(", ");
-    const until = t.up_to_cumulative_net === null ? (c.splits.length > 1 ? "After that" : "Split") : `Until ${money(t.up_to_cumulative_net)} net`;
-    rows.push([until, shares]);
-  });
-  const table = $("terms");
-  table.textContent = "";
-  for (const [k, v] of rows) {
-    const tr = table.insertRow();
-    const th = document.createElement("th");
-    th.textContent = k;
-    tr.appendChild(th);
-    tr.insertCell().textContent = v;
-  }
+  const rules = $("rules");
+  rules.textContent = "";
+  for (const r of c.rules) rules.appendChild(Object.assign(document.createElement("li"), { textContent: r }));
   $("raw").textContent = JSON.stringify(c, null, 2);
   $("deed-id").textContent = "Saved as " + deed.deed_id;
+}
+
+// One row per payee the contract names, so the form fits any number of people.
+function renderPayees(deed) {
+  const saved = Object.fromEntries(deed.payees.map(p => [p.name, p.email]));
+  const box = $("payees");
+  box.textContent = "";
+  for (const p of deed.refined_contract.payees) {
+    const wrap = document.createElement("div");
+    wrap.className = "q";
+    const label = document.createElement("p");
+    label.textContent = p.name;
+    const note = document.createElement("div");
+    note.className = "sub";
+    note.textContent = p.description;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "PayPal email";
+    input.dataset.name = p.name;
+    input.value = saved[p.name] || "";
+    wrap.append(label, note, input);
+    box.appendChild(wrap);
+  }
+  $("payees-saved").textContent = deed.status === "payees_collected" ? "Payees saved." : "";
 }
 
 $("analyse").addEventListener("click", async () => {
@@ -191,6 +200,13 @@ $("send").addEventListener("click", async () => {
   const body = JSON.stringify({ answers: qs.map(q => ({ question: q, answer: answers[q] })) });
   const deed = await call(`/api/deeds/${deedId}/answers`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body }, $("send"));
+  if (deed) render(deed);
+});
+
+$("save-payees").addEventListener("click", async () => {
+  const payees = [...document.querySelectorAll("#payees input")].map(i => ({ name: i.dataset.name, email: i.value.trim() }));
+  const deed = await call(`/api/deeds/${deedId}/payees`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ payees }) }, $("save-payees"));
   if (deed) render(deed);
 });
 

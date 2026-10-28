@@ -56,7 +56,7 @@ def test_full_flow_with_pasted_text(client, store, analyzer):
                        json={"answers": [{"question": QUESTION["question"], "answer": "after"}]})
     assert done.status_code == 200
     assert done.get_json()["status"] == "refined"
-    assert done.get_json()["refined_contract"]["parties"] == ["Alice", "Bob"]
+    assert len(done.get_json()["refined_contract"]["payees"]) == 3
 
     saved = store.get(body["deed_id"])
     assert saved.status == "refined" and saved.clarifications[0]["answer"] == "after"
@@ -104,3 +104,49 @@ def test_bad_answers_rejected(client, answers):
 
 def test_unknown_deed_404(client):
     assert client.get("/api/deeds/deed_nope").status_code == 404
+
+
+def refined_deed(client):
+    deed_id = client.post("/api/deeds", data={"contract_text": "deal"}).get_json()["deed_id"]
+    client.post(f"/api/deeds/{deed_id}/answers", json={"answers": [{"question": QUESTION["question"], "answer": "after"}]})
+    return deed_id
+
+
+EMAILS = {"Alice": "alice@example.com", "Bob": "bob@example.com", "Animal Foundation": "foundation@example.org"}
+
+
+def payee_body(**overrides):
+    emails = {**EMAILS, **overrides}
+    return {"payees": [{"name": n, "email": e} for n, e in emails.items()]}
+
+
+def test_payees_saved_for_every_listed_payee(client, store):
+    deed_id = refined_deed(client)
+    res = client.post(f"/api/deeds/{deed_id}/payees", json=payee_body())
+    assert res.status_code == 200 and res.get_json()["status"] == "payees_collected"
+    assert store.get(deed_id).payees == [{"name": n, "email": e} for n, e in EMAILS.items()]
+
+
+def test_payees_can_be_resubmitted(client, store):
+    deed_id = refined_deed(client)
+    client.post(f"/api/deeds/{deed_id}/payees", json=payee_body())
+    assert client.post(f"/api/deeds/{deed_id}/payees", json=payee_body(Bob="new@example.com")).status_code == 200
+    assert store.get(deed_id).payees[1]["email"] == "new@example.com"
+
+
+@pytest.mark.parametrize("body", [
+    {"payees": []},
+    {"payees": [{"name": "Alice", "email": "alice@example.com"}]},               # missing payees
+    {"payees": payee_body()["payees"] + [{"name": "Mallory", "email": "m@x.com"}]},  # extra recipient
+    payee_body(Bob="not-an-email"),
+    payee_body(Bob=""),
+])
+def test_bad_payees_rejected(client, store, body):
+    deed_id = refined_deed(client)
+    assert client.post(f"/api/deeds/{deed_id}/payees", json=body).status_code == 400
+    assert store.get(deed_id).payees == []
+
+
+def test_payees_rejected_before_refinement(client):
+    deed_id = client.post("/api/deeds", data={"contract_text": "deal"}).get_json()["deed_id"]
+    assert client.post(f"/api/deeds/{deed_id}/payees", json=payee_body()).status_code == 409

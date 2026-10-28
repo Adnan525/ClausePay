@@ -64,18 +64,24 @@ def demo_pdf():
 
 
 def demo_analyzer():
-    """Two rounds with Claude: first it asks questions, then it returns the refined contract."""
+    """Claude asks questions until the deal is unambiguous, then returns the refined contract."""
     analyzer = ContractAnalyzer()
-    contract = open("examples/alice_bob_contract.txt").read()
+    contract = open("examples/alice_bob_foundation_contract.txt").read()
 
-    first = analyzer.analyze(contract)
-    for q in first["questions"]:
-        print("Q:", q["question"], q["options"])
+    answers = []
+    while True:
+        result = analyzer.analyze(contract, answers)
+        if result["status"] == "complete":
+            break
+        for q in result["questions"]:
+            print("Q:", q["question"], q["options"])
+        # In the web app the user picks/types these; here we just take each first suggestion
+        answers += [{"question": q["question"], "answer": q["options"][0]} for q in result["questions"]]
 
-    # In the web app the user picks/types these; here we just take each first suggestion
-    answers = [{"question": q["question"], "answer": q["options"][0]} for q in first["questions"]]
-    second = analyzer.analyze(contract, answers)
-    print(second["status"], "-", second["refined_contract"]["summary"])
+    refined = result["refined_contract"]
+    print(refined["summary"])
+    print("payees to collect emails for:", [p["name"] for p in refined["payees"]])
+    print("\n".join(refined["rules"]))
 
 
 def run_web():

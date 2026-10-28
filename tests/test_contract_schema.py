@@ -15,26 +15,10 @@ def mutate(fn):
 
 
 @pytest.mark.parametrize("bad", [
-    mutate(lambda c: c["splits"][0]["shares"][0].update(percent=50)),          # sums to 90
-    mutate(lambda c: c.update(paypal_fee_bearer="Carol")),                      # unknown party
-    mutate(lambda c: c.update(payout_fee_bearer="nobody")),
-    mutate(lambda c: c["holdback"].update(percent=100)),
-    mutate(lambda c: c["recoupment"].update(amount=0)),
-    mutate(lambda c: c["splits"][0].update(up_to_cumulative_net=500)),          # last tier must be null
-    mutate(lambda c: c.update(parties=["Alice", "Alice"])),
-    mutate(lambda c: c.update(splits=[])),
-    mutate(lambda c: c["refunds"].update(shortfall_covered_by="single_party", shortfall_party=None)),
+    mutate(lambda c: c.update(payees=[])),
+    mutate(lambda c: c.update(rules=[])),
+    mutate(lambda c: c["payees"].append({"name": "Alice", "description": "dup"})),
+    mutate(lambda c: c["payees"][0].update(name="  ")),
 ])
 def test_bad_contracts_are_rejected(bad):
     assert validate_refined_contract(bad)
-
-
-def test_tiers_must_increase():
-    c = good_contract()
-    shares = c["splits"][0]["shares"]
-    c["splits"] = [
-        {"up_to_cumulative_net": 500, "shares": shares},
-        {"up_to_cumulative_net": 300, "shares": shares},
-        {"up_to_cumulative_net": None, "shares": shares},
-    ]
-    assert validate_refined_contract(c)

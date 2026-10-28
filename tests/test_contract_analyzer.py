@@ -36,7 +36,7 @@ def test_returns_questions():
 def test_returns_complete_contract_and_sends_clarifications():
     client = FakeClient(complete(good_contract()))
     result = ContractAnalyzer(client=client).analyze("deal", [{"question": "Q1", "answer": "A1"}])
-    assert result["refined_contract"]["parties"] == ["Alice", "Bob"]
+    assert result["refined_contract"]["payees"][2]["name"] == "Animal Foundation"
     prompt = client.calls[0]["messages"][0]["content"]
     assert "<contract>\ndeal\n</contract>" in prompt and "Q: Q1\nA: A1" in prompt
     assert client.calls[0]["model"] == "claude-sonnet-5-5"
@@ -44,16 +44,16 @@ def test_returns_complete_contract_and_sends_clarifications():
 
 def test_invalid_contract_is_retried_once():
     bad = good_contract()
-    bad["splits"][0]["shares"][0]["percent"] = 50
+    bad["rules"] = []
     client = FakeClient(complete(bad), complete(good_contract()))
     result = ContractAnalyzer(client=client).analyze("deal")
     assert result["status"] == "complete"
-    assert "add up to 100" in client.calls[1]["messages"][-1]["content"]
+    assert "rules must not be empty" in client.calls[1]["messages"][-1]["content"]
 
 
 def test_gives_up_after_second_invalid_answer():
     bad = good_contract()
-    bad["parties"] = []
+    bad["payees"] = []
     with pytest.raises(AnalyzerError):
         ContractAnalyzer(client=FakeClient(complete(bad), complete(bad))).analyze("deal")
 

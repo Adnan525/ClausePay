@@ -5,7 +5,7 @@ from flask import Flask, jsonify, request
 from clausepay.contract_analyzer import AnalyzerError, ContractAnalyzer
 from clausepay.contract_reader import ContractReadError, read_contract
 from clausepay.contract_store import ContractStore, DeedNotFound, JsonContractStore
-from clausepay.deed import Deed
+from clausepay.deed import Deed, validate_payees
 
 
 def create_app(store: ContractStore = None, analyzer: ContractAnalyzer = None):
@@ -21,6 +21,7 @@ def create_app(store: ContractStore = None, analyzer: ContractAnalyzer = None):
             "contract_text": deed.contract_text,
             "questions": deed.pending_questions,
             "refined_contract": deed.refined_contract,
+            "payees": deed.payees,
         }
 
     def error(message, code):
@@ -82,6 +83,26 @@ def create_app(store: ContractStore = None, analyzer: ContractAnalyzer = None):
             apply_analysis(deed)
         except (AnalyzerError, anthropic.APIError) as e:
             return error(f"could not analyse the answers: {e}", 502)
+        store.save(deed)
+        return jsonify(view(deed))
+
+    @app.post("/api/deeds/<deed_id>/payees")
+    def set_payees(deed_id):
+        deed = store.get(deed_id)
+        if deed.status not in ("refined", "payees_collected"):
+            return error("the contract is not ready for payees yet", 409)
+        submitted = (request.get_json(silent=True) or {}).get("payees")
+        expected = sorted(p["name"] for p in deed.refined_contract["payees"])
+        if not isinstance(submitted, list) or sorted(str(p.get("name")) for p in submitted) != expected:
+            return error("give an email for every payee listed in the contract", 400)
+        payees = [{"name": p["name"], "email": str(p.get("email", "")).strip()} for p in submitted]
+        try:
+            validate_payees(payees)
+        except ValueError:
+            return error("every payee needs a valid email address", 400)
+
+        deed.payees = payees
+        deed.status = "payees_collected"
         store.save(deed)
         return jsonify(view(deed))
 
