@@ -22,6 +22,7 @@ def create_app(store: ContractStore = None, analyzer: ContractAnalyzer = None):
             "questions": deed.pending_questions,
             "refined_contract": deed.refined_contract,
             "payees": deed.payees,
+            "clarifications": deed.clarifications,
         }
 
     def error(message, code):

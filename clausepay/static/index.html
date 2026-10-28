@@ -5,212 +5,365 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ClausePay</title>
 <style>
-  :root { --bg:#f6f7f9; --card:#fff; --text:#1c2230; --muted:#667085; --line:#d9dde5; --accent:#2457d6; --danger:#b42318; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#12151c; --card:#1b202b; --text:#e8ebf2; --muted:#9aa3b5; --line:#2e3646; --accent:#7ba0ff; --danger:#ff8a80; }
+  :root {
+    --bg:#f3f5f9; --panel:#ffffff; --text:#1b2333; --muted:#6b7488; --line:#e1e5ee;
+    --accent:#3a5bd9; --accent-text:#fff; --bot:#eef1f8; --user:#3a5bd9; --danger:#c2362b; --ok:#1a7f4b;
+    --shadow:0 8px 30px rgba(24,36,70,.08);
   }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, sans-serif; }
-  main { max-width:760px; margin:0 auto; padding:24px 16px 64px; }
-  h1 { margin:0 0 4px; font-size:28px; }
-  .sub { color:var(--muted); margin:0 0 24px; }
-  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:16px; }
-  h2 { margin:0 0 12px; font-size:18px; }
-  textarea, input[type=text] { width:100%; padding:10px; border:1px solid var(--line); border-radius:8px;
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0f131b; --panel:#171c27; --text:#e7ebf4; --muted:#8f99ae; --line:#283042;
+      --accent:#7b9cff; --accent-text:#0d1220; --bot:#202738; --user:#7b9cff; --danger:#ff8f85; --ok:#5ad19a;
+      --shadow:0 8px 30px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .app { max-width:760px; height:100%; margin:0 auto; display:flex; flex-direction:column; padding:0 16px; }
+  header { display:flex; align-items:center; gap:12px; padding:18px 4px 12px; }
+  .logo { width:34px; height:34px; border-radius:10px; background:var(--accent); color:var(--accent-text);
+    display:grid; place-items:center; font-weight:700; }
+  header h1 { font-size:18px; margin:0; line-height:1.2; }
+  header p { margin:0; color:var(--muted); font-size:13px; }
+  header button { margin-left:auto; }
+  #chat { flex:1; overflow-y:auto; padding:8px 4px 16px; scroll-behavior:smooth; }
+  .row { display:flex; margin:10px 0; animation:in .22s ease-out; }
+  .row.user { justify-content:flex-end; }
+  @keyframes in { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+  .bubble { max-width:86%; padding:11px 15px; border-radius:18px; background:var(--bot); overflow-wrap:anywhere; }
+  .row.bot .bubble { border-bottom-left-radius:6px; }
+  .row.user .bubble { background:var(--user); color:var(--accent-text); border-bottom-right-radius:6px; white-space:pre-wrap; }
+  .bubble.error { background:transparent; border:1px solid var(--danger); color:var(--danger); }
+  .bubble.wide { max-width:100%; width:100%; background:transparent; padding:0; }
+  .bubble.wide .card { margin-top:0; box-shadow:var(--shadow); }
+  .clamp { display:-webkit-box; -webkit-line-clamp:6; -webkit-box-orient:vertical; overflow:hidden; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  button { font:inherit; cursor:pointer; color:var(--text); background:var(--panel); border:1px solid var(--line);
+    border-radius:999px; padding:6px 14px; transition:border-color .15s, background .15s; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button:disabled { opacity:.55; cursor:default; }
+  button.chosen { background:var(--accent); border-color:var(--accent); color:var(--accent-text); opacity:1; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-text); border-radius:10px; padding:8px 16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-top:10px; }
+  .card h3 { margin:0 0 6px; font-size:14px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .card ol { margin:8px 0 0; padding-left:20px; }
+  .card li { margin:5px 0; }
+  .payee { margin:12px 0; }
+  .payee label { font-weight:600; display:block; }
+  .payee small { color:var(--muted); display:block; margin-bottom:6px; }
+  input[type=text] { width:100%; padding:9px 12px; border-radius:10px; border:1px solid var(--line);
     background:var(--bg); color:var(--text); font:inherit; }
-  textarea { min-height:140px; resize:vertical; }
-  button { font:inherit; cursor:pointer; border-radius:8px; border:1px solid var(--line); background:var(--card);
-    color:var(--text); padding:8px 14px; }
-  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  button:disabled { opacity:.5; cursor:wait; }
-  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:12px; }
-  .or { color:var(--muted); margin:10px 0 6px; }
-  .q { margin-bottom:18px; }
-  .q p { margin:0 0 8px; font-weight:600; }
-  .opts { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
-  .opts button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
-  table { width:100%; border-collapse:collapse; margin-top:8px; }
-  td, th { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { width:38%; color:var(--muted); font-weight:500; }
-  .err { color:var(--danger); margin-top:12px; }
-  .hidden { display:none; }
-  details { margin-top:12px; color:var(--muted); }
-  pre { overflow:auto; font-size:13px; }
+  input[type=text]:focus, textarea:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+  .saved { color:var(--ok); margin-left:10px; }
+  .typing { display:inline-flex; gap:4px; padding:4px 0; }
+  .typing i { width:7px; height:7px; border-radius:50%; background:var(--muted); animation:bounce 1.1s infinite; }
+  .typing i:nth-child(2) { animation-delay:.15s; } .typing i:nth-child(3) { animation-delay:.3s; }
+  @keyframes bounce { 0%,60%,100% { transform:none; opacity:.4; } 30% { transform:translateY(-4px); opacity:1; } }
+  details { margin-top:10px; color:var(--muted); } pre { overflow:auto; font-size:12px; }
+  .composer { padding:10px 0 16px; }
+  .filechip { display:none; align-items:center; gap:8px; margin:0 0 8px 4px; font-size:13px; color:var(--muted); }
+  .filechip.on { display:flex; }
+  .filechip button { padding:0 8px; }
+  .box { display:flex; align-items:flex-end; gap:6px; background:var(--panel); border:1px solid var(--line);
+    border-radius:18px; padding:6px 6px 6px 10px; box-shadow:var(--shadow); }
+  textarea { flex:1; border:0; background:transparent; color:var(--text); font:inherit; resize:none; max-height:160px;
+    padding:8px 4px; min-height:38px; }
+  textarea:focus { outline:none; }
+  .icon { width:38px; height:38px; padding:0; border:0; display:grid; place-items:center; border-radius:50%; background:transparent; }
+  .icon svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+  #send { background:var(--accent); color:var(--accent-text); }
+  .hint { text-align:center; color:var(--muted); font-size:12px; margin-top:8px; }
 </style>
 </head>
 <body>
-<main>
-  <h1>ClausePay</h1>
-  <p class="sub">Write your revenue-split deal in plain English. We'll ask about anything unclear. Sandbox only, no legal or financial advice.</p>
+<div class="app">
+  <header>
+    <div class="logo">C</div>
+    <div><h1>ClausePay</h1><p>Plain-English revenue splits on PayPal (sandbox)</p></div>
+    <button id="reset">New contract</button>
+  </header>
 
-  <section id="step-input">
-    <h2>1. Your contract</h2>
-    <textarea id="text" placeholder="e.g. Take PayPal's fee off first. Hold back 10% for 60 days..."></textarea>
-    <div class="or">or attach a file (.pdf, .txt, .md)</div>
-    <input type="file" id="file" accept=".pdf,.txt,.md">
-    <div class="row"><button class="primary" id="analyse">Analyse contract</button></div>
-  </section>
+  <div id="chat" aria-live="polite"></div>
 
-  <section id="step-questions" class="hidden">
-    <h2>2. A few questions</h2>
-    <div id="questions"></div>
-    <div class="row"><button class="primary" id="send">Submit answers</button></div>
-  </section>
-
-  <section id="step-result" class="hidden">
-    <h2>3. Refined contract</h2>
-    <p id="summary"></p>
-    <ol id="rules"></ol>
-    <details><summary>Raw JSON</summary><pre id="raw"></pre></details>
-    <p class="sub" id="deed-id"></p>
-  </section>
-
-  <section id="step-payees" class="hidden">
-    <h2>4. Who gets paid</h2>
-    <p class="sub">Enter the PayPal email for everyone the contract pays.</p>
-    <div id="payees"></div>
-    <div class="row"><button class="primary" id="save-payees">Save payees</button></div>
-    <p id="payees-saved"></p>
-  </section>
-
-  <div class="row"><button id="reset" class="hidden">Start over</button></div>
-  <div class="err" id="error" role="alert"></div>
-</main>
+  <div class="composer">
+    <div class="filechip" id="filechip"><span id="filename"></span><button id="unfile" title="Remove file">&times;</button></div>
+    <div class="box">
+      <button class="icon" id="attach" title="Attach a .pdf, .txt or .md contract" aria-label="Attach contract file">
+        <svg viewBox="0 0 24 24"><path d="M21 12.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l9-9a3.7 3.7 0 0 1 5.2 5.2l-9 9a1.8 1.8 0 0 1-2.6-2.6l8.4-8.4"/></svg>
+      </button>
+      <textarea id="input" rows="1"></textarea>
+      <button class="icon" id="send" aria-label="Send">
+        <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+    <input type="file" id="file" accept=".pdf,.txt,.md" hidden>
+    <div class="hint">Sandbox only. ClausePay does not give legal or financial advice.</div>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
-let deedId = null;
-const answers = {};
+const chat = $("chat"), input = $("input");
+const state = { deedId: null, queue: [], answers: [], current: null, busy: false, stage: "contract", file: null };
 
-function show(id, on) { $(id).classList.toggle("hidden", !on); }
-function setError(msg) { $("error").textContent = msg || ""; }
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+};
 
-async function call(url, options, button) {
-  setError("");
-  button.disabled = true;
-  const label = button.textContent;
-  button.textContent = "Working...";
+function bubble(role, content, extra) {
+  const row = el("div", "row " + role);
+  const b = el("div", "bubble" + (extra ? " " + extra : ""));
+  if (typeof content === "string") b.textContent = content; else b.append(content);
+  row.append(b);
+  chat.append(row);
+  chat.scrollTop = chat.scrollHeight;
+  return b;
+}
+const bot = (c, extra) => bubble("bot", c, extra);
+const user = c => bubble("user", c);
+
+function typing(on) {
+  const old = $("typing");
+  if (old) old.closest(".row").remove();
+  if (!on) return;
+  const dots = el("span", "typing");
+  dots.id = "typing";
+  dots.append(el("i"), el("i"), el("i"));
+  bot(dots);
+}
+
+function setStage(stage) {
+  state.stage = stage;
+  const text = {
+    contract: "Paste your agreement here, or attach a file...",
+    question: "Type your answer, or pick a suggestion",
+    busy: "Thinking...",
+    done: "Fill in the payee emails above",
+  }[stage];
+  input.placeholder = text;
+  const locked = stage === "busy" || stage === "done";
+  input.disabled = locked;
+  $("send").disabled = locked;
+  $("attach").disabled = stage !== "contract";
+}
+
+function errorBubble(message, retry) {
+  const b = bot(message, "error");
+  if (retry) {
+    const btn = el("button", "", "Try again");
+    btn.style.marginLeft = "10px";
+    btn.onclick = () => { b.closest(".row").remove(); retry(); };
+    b.append(btn);
+  }
+}
+
+async function api(url, options) {
+  const res = await fetch(url, options);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || "Something went wrong");
+  return body;
+}
+
+// --- conversation flow -------------------------------------------------
+
+function greet() {
+  bot("Hi! Paste your revenue-sharing agreement below, or attach it as a PDF. I'll check anything that's unclear before we set it up.");
+  setStage("contract");
+  input.focus();
+}
+
+async function submitContract(text, file) {
+  setStage("busy");
+  typing(true);
+  const form = new FormData();
+  form.append("contract_text", text);
+  if (file) form.append("file", file);
   try {
-    const res = await fetch(url, options);
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.error || "Something went wrong");
-    return body;
+    handleDeed(await api("/api/deeds", { method: "POST", body: form }), true);
   } catch (e) {
-    setError(e.message);
-    return null;
-  } finally {
-    button.disabled = false;
-    button.textContent = label;
+    typing(false);
+    setStage("contract");
+    errorBubble(e.message, () => submitContract(text, file));
   }
 }
 
-function render(deed) {
-  deedId = deed.deed_id;
-  show("step-input", false);
-  show("reset", true);
-  show("step-questions", deed.status === "clarifying");
-  const refined = deed.status === "refined" || deed.status === "payees_collected";
-  show("step-result", refined);
-  show("step-payees", refined);
-  if (deed.status === "clarifying") renderQuestions(deed.questions);
-  if (refined) {
-    renderResult(deed);
-    renderPayees(deed);
+async function submitAnswers() {
+  setStage("busy");
+  typing(true);
+  try {
+    handleDeed(await api(`/api/deeds/${state.deedId}/answers`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers: state.answers }),
+    }), false);
+  } catch (e) {
+    typing(false);
+    errorBubble(e.message, submitAnswers);
   }
 }
 
-function renderQuestions(questions) {
-  const box = $("questions");
-  box.textContent = "";
-  for (const k of Object.keys(answers)) delete answers[k];
-  for (const q of questions) {
-    const wrap = document.createElement("div");
-    wrap.className = "q";
-    const p = document.createElement("p");
-    p.textContent = q.question;
-    const opts = document.createElement("div");
-    opts.className = "opts";
-    const input = document.createElement("input");
-    input.type = "text";
-    input.placeholder = "Or type your own answer";
-    input.addEventListener("input", () => {
-      answers[q.question] = input.value;
-      opts.querySelectorAll("button").forEach(b => b.classList.remove("on"));
-    });
-    for (const o of q.options) {
-      const b = document.createElement("button");
-      b.textContent = o;
-      b.addEventListener("click", () => {
-        answers[q.question] = o;
-        input.value = "";
-        opts.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
-      });
-      opts.appendChild(b);
-    }
-    wrap.append(p, opts, input);
-    box.appendChild(wrap);
+function handleDeed(deed, first) {
+  typing(false);
+  state.deedId = deed.deed_id;
+  history.replaceState(null, "", "#" + deed.deed_id);
+  if (deed.status === "clarifying") {
+    bot(first ? "Thanks. A few things aren't clear yet, so let me ask."
+              : "Thanks, that helps. I have a couple more questions.");
+    state.queue = [...deed.questions];
+    state.answers = [];
+    askNext();
+  } else {
+    showResult(deed);
   }
 }
 
-function renderResult(deed) {
+function askNext() {
+  if (!state.queue.length) { state.current = null; return submitAnswers(); }
+  const q = state.current = state.queue.shift();
+  const b = bot(q.question);
+  const chips = el("div", "chips");
+  for (const option of q.options) {
+    const chip = el("button", "", option);
+    chip.onclick = () => answer(option, chip);
+    chips.append(chip);
+  }
+  b.append(chips);
+  setStage("question");
+  input.focus();
+}
+
+function answer(text, chip) {
+  const q = state.current;
+  if (!q || !text.trim()) return;
+  state.current = null;
+  const chips = chat.querySelectorAll(".chips");
+  const last = chips[chips.length - 1];
+  if (last) last.querySelectorAll("button").forEach(b => { b.disabled = true; if (b === chip) b.classList.add("chosen"); });
+  state.answers.push({ question: q.question, answer: text.trim() });
+  user(text.trim());
+  setStage("busy");
+  setTimeout(askNext, 350);
+}
+
+// --- result and payees -------------------------------------------------
+
+function showResult(deed) {
   const c = deed.refined_contract;
-  $("summary").textContent = c.summary;
-  const rules = $("rules");
-  rules.textContent = "";
-  for (const r of c.rules) rules.appendChild(Object.assign(document.createElement("li"), { textContent: r }));
-  $("raw").textContent = JSON.stringify(c, null, 2);
-  $("deed-id").textContent = "Saved as " + deed.deed_id;
+  bot("That's everything I need. Here is the agreement as I understand it:");
+
+  const card = el("div", "card");
+  card.append(el("h3", "", "Agreement"), el("div", "", c.summary));
+  const rules = el("ol");
+  for (const r of c.rules) rules.append(el("li", "", r));
+  const details = el("details");
+  details.append(el("summary", "", "Raw JSON"), el("pre", "", JSON.stringify(c, null, 2)));
+  card.append(rules, details);
+  bot(card, "wide");
+
+  bot("Who should get paid? Enter a PayPal email for each of them.");
+  bot(payeeCard(deed), "wide");
+  setStage("done");
 }
 
 // One row per payee the contract names, so the form fits any number of people.
-function renderPayees(deed) {
+function payeeCard(deed) {
   const saved = Object.fromEntries(deed.payees.map(p => [p.name, p.email]));
-  const box = $("payees");
-  box.textContent = "";
+  const card = el("div", "card");
+  card.append(el("h3", "", "Payees"));
+  const inputs = [];
   for (const p of deed.refined_contract.payees) {
-    const wrap = document.createElement("div");
-    wrap.className = "q";
-    const label = document.createElement("p");
-    label.textContent = p.name;
-    const note = document.createElement("div");
-    note.className = "sub";
-    note.textContent = p.description;
-    const input = document.createElement("input");
-    input.type = "text";
-    input.placeholder = "PayPal email";
-    input.dataset.name = p.name;
-    input.value = saved[p.name] || "";
-    wrap.append(label, note, input);
-    box.appendChild(wrap);
+    const wrap = el("div", "payee");
+    const field = el("input");
+    field.type = "text";
+    field.placeholder = "PayPal email";
+    field.value = saved[p.name] || "";
+    field.dataset.name = p.name;
+    inputs.push(field);
+    wrap.append(el("label", "", p.name), el("small", "", p.description), field);
+    card.append(wrap);
   }
-  $("payees-saved").textContent = deed.status === "payees_collected" ? "Payees saved." : "";
+  const save = el("button", "primary", deed.status === "payees_collected" ? "Update payees" : "Save payees");
+  const note = el("span", "saved", deed.status === "payees_collected" ? "Saved ✓" : "");
+  save.onclick = async () => {
+    save.disabled = true;
+    note.textContent = "";
+    try {
+      await api(`/api/deeds/${state.deedId}/payees`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payees: inputs.map(i => ({ name: i.dataset.name, email: i.value.trim() })) }),
+      });
+      note.textContent = "Saved ✓";
+      note.style.color = "";
+      save.textContent = "Update payees";
+    } catch (e) {
+      note.textContent = e.message;
+      note.style.color = "var(--danger)";
+    } finally {
+      save.disabled = false;
+    }
+  };
+  card.append(save, note);
+  return card;
 }
 
-$("analyse").addEventListener("click", async () => {
-  const form = new FormData();
-  form.append("contract_text", $("text").value);
-  if ($("file").files[0]) form.append("file", $("file").files[0]);
-  const deed = await call("/api/deeds", { method: "POST", body: form }, $("analyse"));
-  if (deed) render(deed);
-});
+// --- composer ----------------------------------------------------------
 
-$("send").addEventListener("click", async () => {
-  const qs = [...document.querySelectorAll("#questions .q p")].map(p => p.textContent);
-  if (qs.some(q => !(answers[q] || "").trim())) return setError("Answer every question first.");
-  const body = JSON.stringify({ answers: qs.map(q => ({ question: q, answer: answers[q] })) });
-  const deed = await call(`/api/deeds/${deedId}/answers`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body }, $("send"));
-  if (deed) render(deed);
-});
+function send() {
+  const text = input.value.trim();
+  if (state.stage === "contract") {
+    if (!text && !state.file) return;
+    const file = state.file;
+    user(file ? `\u{1F4CE} ${file.name}${text ? "\n" + text : ""}` : text);
+    input.value = "";
+    clearFile();
+    autosize();
+    submitContract(text, file);
+  } else if (state.stage === "question" && text) {
+    input.value = "";
+    autosize();
+    answer(text, null);
+  }
+}
 
-$("save-payees").addEventListener("click", async () => {
-  const payees = [...document.querySelectorAll("#payees input")].map(i => ({ name: i.dataset.name, email: i.value.trim() }));
-  const deed = await call(`/api/deeds/${deedId}/payees`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ payees }) }, $("save-payees"));
-  if (deed) render(deed);
-});
+function clearFile() { state.file = null; $("file").value = ""; $("filechip").classList.remove("on"); }
+function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; }
 
-$("reset").addEventListener("click", () => location.reload());
+input.addEventListener("input", autosize);
+input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+$("send").onclick = send;
+$("attach").onclick = () => $("file").click();
+$("file").onchange = () => {
+  state.file = $("file").files[0] || null;
+  if (state.file) { $("filename").textContent = "\u{1F4CE} " + state.file.name; $("filechip").classList.add("on"); }
+};
+$("unfile").onclick = clearFile;
+$("reset").onclick = () => { history.replaceState(null, "", location.pathname); location.reload(); };
+
+// --- resume a conversation from the URL (#deed_xxxx) -------------------
+
+async function resume(id) {
+  const deed = await api("/api/deeds/" + id);
+  state.deedId = deed.deed_id;
+  bot("Welcome back. Here is where we left off.");
+  user(deed.contract_text);
+  chat.lastElementChild.querySelector(".bubble").classList.add("clamp");
+  for (const c of deed.clarifications) { bot(c.question); user(c.answer); }
+  if (deed.status === "clarifying") {
+    state.queue = [...deed.questions];
+    state.answers = [];
+    askNext();
+  } else {
+    showResult(deed);
+  }
+}
+
+setStage("contract");
+const hash = location.hash.slice(1);
+if (hash.startsWith("deed_")) resume(hash).catch(() => { history.replaceState(null, "", location.pathname); greet(); });
+else greet();
 </script>
 </body>
 </html>
