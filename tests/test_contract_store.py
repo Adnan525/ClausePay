@@ -59,7 +59,7 @@ def test_file_is_keyed_by_deed_id(store):
         assert list(json.load(f)) == [deed.deed_id]
 
 
-@pytest.mark.parametrize("payees", [[], [{"name": "A", "email": "nope"}], [{"email": "a@b.com"}]])
+@pytest.mark.parametrize("payees", [[{"name": "A", "email": "nope"}], [{"email": "a@b.com"}]])
 def test_invalid_payees_rejected(payees):
     with pytest.raises(ValueError):
         Deed(payees=payees, contract_text="x")
@@ -68,3 +68,7 @@ def test_invalid_payees_rejected(payees):
 def test_invalid_status_rejected():
     with pytest.raises(ValueError):
         Deed(payees=PAYEES, contract_text="x", status="bogus")
+
+
+def test_deed_can_exist_before_payees_are_known():
+    assert Deed(contract_text="x").payees == []

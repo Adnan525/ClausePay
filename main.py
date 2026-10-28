@@ -4,10 +4,12 @@ import time
 
 from dotenv import load_dotenv
 
+from clausepay.contract_analyzer import ContractAnalyzer
 from clausepay.contract_store import JsonContractStore
 from clausepay.deed import Deed
 from clausepay.paypal_client import PayPalClient
 from clausepay.pdf_renderer import PdfRenderer
+from clausepay.webapp import create_app
 
 load_dotenv()
 
@@ -29,12 +31,8 @@ def demo_paypal():
 def demo_store():
     store = JsonContractStore("data/deeds.json")  # swap for a Postgres store later
 
-    # Payees come from a form, not from the contract text
+    # Payees are attached later (from the web form), once the contract is settled
     deed = store.add(Deed(
-        payees=[
-            {"name": "Alice", "email": os.getenv("u_1_email")},
-            {"name": "Bob", "email": os.getenv("u_2_email")},
-        ],
         contract_text="Take PayPal's fee off first. Hold back 10% for 60 days. "
                       "Bob gets everything until his $1,000 licence is repaid, then Alice 60% / Bob 40%.",
     ))
@@ -42,6 +40,10 @@ def demo_store():
 
     deed = store.get(deed.deed_id)
     deed.status = "clarifying"
+    deed.payees = [
+        {"name": "Alice", "email": os.getenv("u_1_email")},
+        {"name": "Bob", "email": os.getenv("u_2_email")},
+    ]
     store.save(deed)
     print("updated:", store.get(deed.deed_id).status)
     print("all deeds:", [d.deed_id for d in store.list()])
@@ -61,7 +63,29 @@ def demo_pdf():
     print("wrote:", path)
 
 
+def demo_analyzer():
+    """Two rounds with Claude: first it asks questions, then it returns the refined contract."""
+    analyzer = ContractAnalyzer()
+    contract = open("examples/alice_bob_contract.txt").read()
+
+    first = analyzer.analyze(contract)
+    for q in first["questions"]:
+        print("Q:", q["question"], q["options"])
+
+    # In the web app the user picks/types these; here we just take each first suggestion
+    answers = [{"question": q["question"], "answer": q["options"][0]} for q in first["questions"]]
+    second = analyzer.analyze(contract, answers)
+    print(second["status"], "-", second["refined_contract"]["summary"])
+
+
+def run_web():
+    """Starts the web app at http://127.0.0.1:5000 (paste or upload a contract, answer questions)."""
+    create_app().run(port=5000)
+
+
 if __name__ == "__main__":
     # demo_paypal()  # sends a real sandbox payout each time, so it is commented out
     # demo_store()
-    demo_pdf()
+    # demo_pdf()
+    # demo_analyzer()  # calls Claude
+    run_web()

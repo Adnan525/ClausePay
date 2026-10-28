@@ -3,7 +3,7 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
-STATUSES = ("draft", "clarifying", "pending_approval", "approved", "active")
+STATUSES = ("draft", "clarifying", "refined", "pending_approval", "approved", "active")
 
 
 def _now():
@@ -12,10 +12,12 @@ def _now():
 
 @dataclass
 class Deed:
-    payees: list  # [{"name": ..., "email": ...}], from a form, never from the contract text
     contract_text: str
+    payees: list = field(default_factory=list)  # [{"name", "email"}], from a form once the contract is settled
     deed_id: str = field(default_factory=lambda: f"deed_{uuid.uuid4().hex[:8]}")
-    refined_contract: dict = None  # filled in once the missing details are captured
+    clarifications: list = field(default_factory=list)  # answered [{"question", "answer"}]
+    pending_questions: list = field(default_factory=list)  # [{"question", "options"}] awaiting an answer
+    refined_contract: dict = None  # fixed-schema contract, see contract_schema.py
     status: str = "draft"
     ledger: list = field(default_factory=list)  # sales, holdbacks, payouts
     created_at: str = field(default_factory=_now)
@@ -24,8 +26,6 @@ class Deed:
     def __post_init__(self):
         if self.status not in STATUSES:
             raise ValueError(f"unknown status {self.status!r}")
-        if not self.payees:
-            raise ValueError("a deed needs at least one payee")
         for payee in self.payees:
             if not payee.get("name") or "@" not in payee.get("email", ""):
                 raise ValueError(f"payee needs a name and an email: {payee}")

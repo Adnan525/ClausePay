@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClausePay</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c2230; --muted:#667085; --line:#d9dde5; --accent:#2457d6; --danger:#b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151c; --card:#1b202b; --text:#e8ebf2; --muted:#9aa3b5; --line:#2e3646; --accent:#7ba0ff; --danger:#ff8a80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { margin:0 0 4px; font-size:28px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:16px; }
+  h2 { margin:0 0 12px; font-size:18px; }
+  textarea, input[type=text] { width:100%; padding:10px; border:1px solid var(--line); border-radius:8px;
+    background:var(--bg); color:var(--text); font:inherit; }
+  textarea { min-height:140px; resize:vertical; }
+  button { font:inherit; cursor:pointer; border-radius:8px; border:1px solid var(--line); background:var(--card);
+    color:var(--text); padding:8px 14px; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+  .or { color:var(--muted); margin:10px 0 6px; }
+  .q { margin-bottom:18px; }
+  .q p { margin:0 0 8px; font-weight:600; }
+  .opts { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+  .opts button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; }
+  td, th { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { width:38%; color:var(--muted); font-weight:500; }
+  .err { color:var(--danger); margin-top:12px; }
+  .hidden { display:none; }
+  details { margin-top:12px; color:var(--muted); }
+  pre { overflow:auto; font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ClausePay</h1>
+  <p class="sub">Write your revenue-split deal in plain English. We'll ask about anything unclear. Sandbox only, no legal or financial advice.</p>
+
+  <section id="step-input">
+    <h2>1. Your contract</h2>
+    <textarea id="text" placeholder="e.g. Take PayPal's fee off first. Hold back 10% for 60 days..."></textarea>
+    <div class="or">or attach a file (.pdf, .txt, .md)</div>
+    <input type="file" id="file" accept=".pdf,.txt,.md">
+    <div class="row"><button class="primary" id="analyse">Analyse contract</button></div>
+  </section>
+
+  <section id="step-questions" class="hidden">
+    <h2>2. A few questions</h2>
+    <div id="questions"></div>
+    <div class="row"><button class="primary" id="send">Submit answers</button></div>
+  </section>
+
+  <section id="step-result" class="hidden">
+    <h2>3. Refined contract</h2>
+    <p id="summary"></p>
+    <table id="terms"></table>
+    <details><summary>Raw JSON</summary><pre id="raw"></pre></details>
+    <p class="sub" id="deed-id"></p>
+  </section>
+
+  <div class="row"><button id="reset" class="hidden">Start over</button></div>
+  <div class="err" id="error" role="alert"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let deedId = null;
+const answers = {};
+
+function show(id, on) { $(id).classList.toggle("hidden", !on); }
+function setError(msg) { $("error").textContent = msg || ""; }
+
+async function call(url, options, button) {
+  setError("");
+  button.disabled = true;
+  const label = button.textContent;
+  button.textContent = "Working...";
+  try {
+    const res = await fetch(url, options);
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || "Something went wrong");
+    return body;
+  } catch (e) {
+    setError(e.message);
+    return null;
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+function render(deed) {
+  deedId = deed.deed_id;
+  show("step-input", false);
+  show("reset", true);
+  show("step-questions", deed.status === "clarifying");
+  show("step-result", deed.status === "refined");
+  if (deed.status === "clarifying") renderQuestions(deed.questions);
+  if (deed.status === "refined") renderResult(deed);
+}
+
+function renderQuestions(questions) {
+  const box = $("questions");
+  box.textContent = "";
+  for (const k of Object.keys(answers)) delete answers[k];
+  for (const q of questions) {
+    const wrap = document.createElement("div");
+    wrap.className = "q";
+    const p = document.createElement("p");
+    p.textContent = q.question;
+    const opts = document.createElement("div");
+    opts.className = "opts";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "Or type your own answer";
+    input.addEventListener("input", () => {
+      answers[q.question] = input.value;
+      opts.querySelectorAll("button").forEach(b => b.classList.remove("on"));
+    });
+    for (const o of q.options) {
+      const b = document.createElement("button");
+      b.textContent = o;
+      b.addEventListener("click", () => {
+        answers[q.question] = o;
+        input.value = "";
+        opts.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+      });
+      opts.appendChild(b);
+    }
+    wrap.append(p, opts, input);
+    box.appendChild(wrap);
+  }
+}
+
+const money = n => "$" + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const who = v => v === "pool" ? "Taken off the top (shared pool)" : v === "each_recipient" ? "Each recipient pays their own" : v;
+const words = v => v.replaceAll("_", " ");
+
+function renderResult(deed) {
+  const c = deed.refined_contract;
+  $("summary").textContent = c.summary;
+  const rows = [
+    ["People", c.parties.join(", ")],
+    ["PayPal fee", who(c.paypal_fee_bearer)],
+    ["Fee PayPal doesn't return on refunds", who(c.unreturned_refund_fee_bearer)],
+    ["Payout fees", who(c.payout_fee_bearer)],
+    ["Holdback", c.holdback
+      ? `${c.holdback.percent}% for ${c.holdback.days} days, worked out ${words(c.holdback.calculated_on)}; on release: ${words(c.holdback.release_order)}`
+      : "None"],
+    ["Refunds", `Paid from ${words(c.refunds.funded_from)}; any shortfall covered by ${c.refunds.shortfall_covered_by === "single_party" ? c.refunds.shortfall_party : "the split percentages"}`],
+    ["Recoupment", c.recoupment
+      ? `${c.recoupment.party} gets ${c.recoupment.party_share_percent}% until ${money(c.recoupment.amount)} is repaid`
+      : "None"],
+  ];
+  c.splits.forEach((t, i) => {
+    const shares = t.shares.map(s => `${s.party} ${s.percent}%`).join(", ");
+    const until = t.up_to_cumulative_net === null ? (c.splits.length > 1 ? "After that" : "Split") : `Until ${money(t.up_to_cumulative_net)} net`;
+    rows.push([until, shares]);
+  });
+  const table = $("terms");
+  table.textContent = "";
+  for (const [k, v] of rows) {
+    const tr = table.insertRow();
+    const th = document.createElement("th");
+    th.textContent = k;
+    tr.appendChild(th);
+    tr.insertCell().textContent = v;
+  }
+  $("raw").textContent = JSON.stringify(c, null, 2);
+  $("deed-id").textContent = "Saved as " + deed.deed_id;
+}
+
+$("analyse").addEventListener("click", async () => {
+  const form = new FormData();
+  form.append("contract_text", $("text").value);
+  if ($("file").files[0]) form.append("file", $("file").files[0]);
+  const deed = await call("/api/deeds", { method: "POST", body: form }, $("analyse"));
+  if (deed) render(deed);
+});
+
+$("send").addEventListener("click", async () => {
+  const qs = [...document.querySelectorAll("#questions .q p")].map(p => p.textContent);
+  if (qs.some(q => !(answers[q] || "").trim())) return setError("Answer every question first.");
+  const body = JSON.stringify({ answers: qs.map(q => ({ question: q, answer: answers[q] })) });
+  const deed = await call(`/api/deeds/${deedId}/answers`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body }, $("send"));
+  if (deed) render(deed);
+});
+
+$("reset").addEventListener("click", () => location.reload());
+</script>
+</body>
+</html>
