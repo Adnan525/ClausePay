@@ -1,13 +1,18 @@
 from collections.abc import Iterator
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
 from flask.testing import FlaskClient
 
+from clausepay.contract_chat import ContractAssistant
+from clausepay.contract_store import ContractStore
 from clausepay.orders import OrderStore
 from clausepay.paypal_client import PayPalClient, PayPalError
 from clausepay.webapp import create_app, parse_amount
+from tests.contracts import reference_submission
+from tests.fake_claude import FakeClaude, question
 
 
 class FakePayPal:
@@ -71,7 +76,12 @@ def fake() -> FakePayPal:
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch, fake: FakePayPal) -> Iterator[FlaskClient]:
+def claude() -> FakeClaude:
+    return FakeClaude([])
+
+
+@pytest.fixture
+def client(monkeypatch: pytest.MonkeyPatch, fake: FakePayPal, claude: FakeClaude, tmp_path: Path) -> Iterator[FlaskClient]:
     monkeypatch.setenv("u_1_email", "a@example.com")
     monkeypatch.setenv("u_2_email", "b@example.com")
     monkeypatch.setenv("buyer_email", "buyer@example.com")
@@ -79,7 +89,9 @@ def client(monkeypatch: pytest.MonkeyPatch, fake: FakePayPal) -> Iterator[FlaskC
     monkeypatch.setenv("paypal_webhook_id", "")
     monkeypatch.setenv("buyer_password", "super-secret-password")
     monkeypatch.setenv("client_secret", "super-secret-client")
-    yield create_app(client=fake, store=OrderStore()).test_client()  # type: ignore[arg-type]
+    app = create_app(client=fake, store=OrderStore(), contracts=ContractStore(tmp_path),  # type: ignore[arg-type]
+                     assistant=ContractAssistant(claude))  # type: ignore[arg-type]
+    yield app.test_client()
 
 
 def place_order(client: FlaskClient, amount: str = "10.00") -> dict[str, Any]:
@@ -88,20 +100,20 @@ def place_order(client: FlaskClient, amount: str = "10.00") -> dict[str, Any]:
     return response.get_json()
 
 
-def test_dashboard_states_demo_only(client: FlaskClient) -> None:
-    for path in ("/", "/order"):
+def test_every_page_states_demo_only(client: FlaskClient) -> None:
+    for path in ("/", "/accounts", "/order"):
         assert "DEMO ONLY" in client.get(path).get_data(as_text=True)
 
 
-def test_dashboard_shows_every_account_label_and_email(client: FlaskClient) -> None:
-    page = client.get("/").get_data(as_text=True)
+def test_accounts_page_shows_every_account_label_and_email(client: FlaskClient) -> None:
+    page = client.get("/accounts").get_data(as_text=True)
     for text in ("Business", "Seller A", "Seller B", "Buyer", "a@example.com", "b@example.com", "buyer@example.com"):
         assert text in page
     assert "not configured" in page  # the business email is not set in this test
 
 
 def test_pages_never_leak_secrets(client: FlaskClient) -> None:
-    for path in ("/", "/order"):
+    for path in ("/", "/accounts", "/order"):
         assert "super-secret" not in client.get(path).get_data(as_text=True)
 
 
@@ -209,3 +221,185 @@ def test_verified_webhook_confirms_the_order_once(client: FlaskClient, monkeypat
     assert client.post("/webhooks/paypal", json=webhook_event()).get_json() == {"duplicate": True}
     order = client.get("/api/orders/ORDER1").get_json()
     assert order["webhook_confirmed"] is True and order["webhook_enabled"] is True
+
+
+# ---------- contract (main app) ----------
+
+def ready(client: FlaskClient, claude: FakeClaude) -> dict[str, Any]:
+    claude.messages.replies.append(reference_submission())
+    return client.post("/api/contract/message", json={"text": "the whole contract"}).get_json()
+
+
+def run_scenario(client: FlaskClient, slot: int, events: list[dict[str, Any]], title: str = "") -> Any:
+    return client.post("/api/contract/scenario", json={"slot": slot, "title": title, "events": events})
+
+
+def sale(amount: str) -> dict[str, Any]:
+    return {"type": "sale", "amount": amount, "sale_number": 0}
+
+
+def refund(amount: str, sale_number: int) -> dict[str, Any]:
+    return {"type": "refund", "amount": amount, "sale_number": sale_number}
+
+
+def approve_all(client: FlaskClient) -> None:
+    for slot in range(3):
+        assert run_scenario(client, slot, [sale("100.00"), refund("", 1)]).status_code == 200
+        assert client.post("/api/contract/approve", json={"scenario": slot}).status_code == 200
+
+
+EMAILS = {"emails": {"Alice": "alice@example.com", "Bob": "bob@example.com"}}
+
+
+def test_contract_is_the_main_tab_and_the_other_tabs_are_demo_helpers(client: FlaskClient) -> None:
+    home = client.get("/").get_data(as_text=True)
+    assert 'id="panel-chat"' in home and "Review &amp; approve" in home
+    assert 'href="/" class="active"' in home and "Demo helpers" in home
+    assert 'href="/accounts"' in home and 'href="/order"' in home
+
+
+def test_a_new_contract_starts_empty(client: FlaskClient) -> None:
+    state = client.get("/api/contract").get_json()
+    assert (state["status"], state["display"], state["approvals_needed"]) == ("chatting", [], 3)
+    assert state["scenarios"] == [None, None, None] and state["emails"] == {} and "api_messages" not in state
+
+
+def test_chatting_with_claude_returns_the_updated_conversation(client: FlaskClient, claude: FakeClaude) -> None:
+    claude.messages.replies.append(question("Who pays PayPal's fee?"))
+    state = client.post("/api/contract/message", json={"text": "A and B split 60/40"}).get_json()
+    assert [m["role"] for m in state["display"]] == ["user", "assistant"]
+    assert state["display"][1]["text"] == "Who pays PayPal's fee?" and state["status"] == "chatting"
+
+
+def test_empty_messages_are_refused(client: FlaskClient, claude: FakeClaude) -> None:
+    assert client.post("/api/contract/message", json={"text": "  "}).status_code == 400
+    assert claude.messages.requests == []
+
+
+def test_a_finished_contract_is_ready_with_no_scenarios_yet(client: FlaskClient, claude: FakeClaude) -> None:
+    state = ready(client, claude)
+    assert state["status"] == "ready" and state["scenarios"] == [None] * 3 and state["approvals"] == []
+    assert state["parties"][0]["name"] == "Alice" and "def calculate_payout" in state["code"]
+    assert [d["label"] for d in state["demo_emails"]] == ["Seller A", "Seller B"]
+
+
+def test_scenarios_cannot_be_run_before_there_is_a_contract(client: FlaskClient) -> None:
+    response = run_scenario(client, 0, [sale("100.00")])
+    assert response.status_code == 400 and "no draft" in response.get_json()["error"]
+
+
+def test_a_user_scenario_is_run_and_explained(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    state = run_scenario(client, 0, [sale("100.00"), refund("", 1)], "My first test").get_json()
+    assert state["scenarios"][0]["title"] == "My first test"
+    steps = state["simulations"][0]["steps"]
+    assert "A$97.30" in " ".join(steps[0]["lines"]) and "refunded A$100.00" in " ".join(steps[1]["lines"])
+    assert state["simulations"][1] is None
+
+
+def test_bad_scenario_input_is_explained_and_not_saved(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    response = run_scenario(client, 0, [sale("0.10"), refund("5", 3)])
+    assert response.status_code == 400 and "sale amount must be" in response.get_json()["error"]
+    assert client.get("/api/contract").get_json()["scenarios"][0] is None
+    assert run_scenario(client, 7, [sale("10.00")]).status_code == 400
+
+
+def test_a_scenario_the_contract_cannot_handle_shows_the_problem(client: FlaskClient, claude: FakeClaude) -> None:
+    claude.messages.replies.append({**reference_submission(), "code": reference_submission()["code"].replace(
+        "    net = sale_amount - paypal_fee",
+        '    if sale_amount == Decimal("77.00"):\n        raise ValueError("unlucky amount")\n    net = sale_amount - paypal_fee', 1)})
+    client.post("/api/contract/message", json={"text": "contract"})
+    state = run_scenario(client, 0, [sale("77.00")]).get_json()
+    assert "unlucky amount" in state["simulations"][0]["error"]
+    assert client.post("/api/contract/approve", json={"scenario": 0}).status_code == 400
+
+
+def test_editing_a_scenario_withdraws_only_its_approval(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    for slot in (0, 1):
+        run_scenario(client, slot, [sale("100.00")])
+        client.post("/api/contract/approve", json={"scenario": slot})
+    state = run_scenario(client, 0, [sale("120.00")]).get_json()
+    assert state["approvals"] == [1]
+
+
+def test_clearing_a_scenario(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    run_scenario(client, 2, [sale("100.00")])
+    state = client.post("/api/contract/scenario/clear", json={"slot": 2}).get_json()
+    assert state["scenarios"][2] is None and state["simulations"][2] is None
+
+
+def test_unknown_or_unrun_scenarios_cannot_be_approved(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    assert client.post("/api/contract/approve", json={"scenario": 0}).status_code == 400
+    assert client.post("/api/contract/approve", json={"scenario": 7}).status_code == 400
+    assert client.post("/api/contract/approve", json={"scenario": "x"}).status_code == 400
+
+
+def test_emails_are_saved_by_the_server_and_checked(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    state = client.post("/api/contract/emails", json=EMAILS).get_json()
+    assert state["emails"] == EMAILS["emails"] and state["emails_complete"] is True
+    bad = client.post("/api/contract/emails", json={"emails": {"Alice": "nope"}})
+    assert bad.status_code == 400 and "does not look like an email" in bad.get_json()["error"]
+    assert client.get("/api/contract").get_json()["emails"] == EMAILS["emails"]  # a rejected save changes nothing
+    assert client.post("/api/contract/emails", json={"emails": {"Carol": "c@example.com"}}).status_code == 400
+
+
+def test_freezing_needs_three_approvals_and_every_email(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    early = client.post("/api/contract/freeze", json={})
+    assert early.status_code == 400 and "approved scenarios and an email" in early.get_json()["error"]
+    approve_all(client)
+    assert client.post("/api/contract/freeze", json={}).status_code == 400  # still no emails
+    client.post("/api/contract/emails", json=EMAILS)
+    frozen = client.post("/api/contract/freeze", json={})
+    assert frozen.status_code == 200 and frozen.get_json()["status"] == "frozen"
+    assert len(frozen.get_json()["frozen"]["sha256"]) == 64
+
+
+def test_a_frozen_contract_is_locked(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    approve_all(client)
+    client.post("/api/contract/emails", json=EMAILS)
+    client.post("/api/contract/freeze", json={})
+    assert client.post("/api/contract/message", json={"text": "change it"}).status_code == 409
+    assert client.post("/api/contract/approve", json={"scenario": 0}).status_code == 400
+    assert run_scenario(client, 0, [sale("5.00")]).status_code == 400
+    assert client.post("/api/contract/emails", json={"emails": {"Alice": "x@example.com"}}).status_code == 400
+
+
+def test_a_changed_contract_resets_the_approvals_but_keeps_scenarios_and_emails(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    run_scenario(client, 0, [sale("100.00")])
+    client.post("/api/contract/approve", json={"scenario": 0})
+    client.post("/api/contract/emails", json=EMAILS)
+    claude.messages.replies.append(reference_submission())
+    state = client.post("/api/contract/message", json={"text": "actually change it"}).get_json()
+    assert state["approvals"] == [] and state["version"] == 2
+    assert state["scenarios"][0] is not None and "steps" in state["simulations"][0]
+    assert state["emails"] == EMAILS["emails"]
+
+
+def test_start_over_clears_the_draft(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    state = client.post("/api/contract/reset", json={}).get_json()
+    assert state["status"] == "chatting" and state["display"] == [] and state["emails"] == {}
+
+
+def test_claude_failures_are_shown_in_the_chat_not_as_a_crash(client: FlaskClient, claude: FakeClaude) -> None:
+    from tests.fake_claude import FakeBlock, FakeResponse
+    claude.messages.replies.append(FakeResponse([FakeBlock("{")], stop_reason="max_tokens"))
+    response = client.post("/api/contract/message", json={"text": "contract"})
+    body = response.get_json()
+    assert response.status_code == 502 and "cut off" in body["error"]
+    assert body["display"][-1]["kind"] == "error"
+
+
+def test_a_missing_claude_key_is_explained(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("claude_key", "")
+    app = create_app(contracts=ContractStore(tmp_path))
+    response = app.test_client().post("/api/contract/message", json={"text": "hello"})
+    assert response.status_code == 502 and "claude_key" in response.get_json()["error"]

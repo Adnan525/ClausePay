@@ -1,12 +1,17 @@
 """ClausePay demo web app. Demo only: PayPal sandbox, no real money."""
 import os
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
+import anthropic
 from dotenv import find_dotenv, load_dotenv
 from flask import Flask, jsonify, render_template, request, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from clausepay.accounts import load_accounts
+from clausepay.contract_chat import AssistantError, ContractAssistant
+from clausepay.contract_sim import ContractProblem, parse_scenario, simulate_scenario
+from clausepay.contract_store import ContractStore
 from clausepay.orders import Order, OrderStore
 from clausepay.paypal_client import Json, PayPalClient, PayPalError
 
@@ -27,18 +32,41 @@ def parse_amount(text: object) -> Decimal:
     return amount
 
 
-def create_app(client: PayPalClient | None = None, store: OrderStore | None = None) -> Flask:
+def create_app(
+    client: PayPalClient | None = None,
+    store: OrderStore | None = None,
+    contracts: ContractStore | None = None,
+    assistant: ContractAssistant | None = None,
+) -> Flask:
     load_dotenv(find_dotenv(usecwd=True))
     app = Flask(__name__)
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)  # type: ignore[method-assign]
     orders = store or OrderStore()
+    contract_store = contracts or ContractStore(Path(os.getenv("data_dir", "data")))
     paypal: list[PayPalClient] = [client] if client else []
+    claude: list[ContractAssistant] = [assistant] if assistant else []
 
 
     def get_client() -> PayPalClient:
         if not paypal:
             paypal.append(PayPalClient())
         return paypal[0]
+
+
+    def get_assistant() -> ContractAssistant:
+        if not claude:
+            key = os.getenv("claude_key", "").strip()
+            if not key:
+                raise AssistantError("Claude is not set up on this server: the claude_key setting is missing.")
+            claude.append(ContractAssistant(anthropic.Anthropic(api_key=key, timeout=170.0)))
+        return claude[0]
+
+
+    def contract_json() -> Json:
+        """The contract as the browser sees it, plus the demo accounts it can offer for the email form."""
+        sellers = [account for account in load_accounts() if account.label.startswith("Seller") and account.email]
+        return {**contract_store.current().public(),
+                "demo_emails": [{"label": account.label, "email": account.email} for account in sellers]}
 
 
     def webhook_id() -> str:
@@ -66,8 +94,114 @@ def create_app(client: PayPalClient | None = None, store: OrderStore | None = No
 
 
     @app.get("/")
+    def contract_page() -> str:
+        return render_template("contract.html", active="contract")
+
+
+    @app.get("/accounts")
     def dashboard() -> str:
         return render_template("dashboard.html", accounts=load_accounts(), active="accounts")
+
+
+    @app.get("/api/contract")
+    def contract_state() -> Json:
+        return contract_json()
+
+
+    @app.post("/api/contract/message")
+    def contract_message() -> tuple[Json, int]:
+        text = str((request.get_json(silent=True) or {}).get("text", "")).strip()
+        record = contract_store.current()
+        if not text:
+            return {"error": "Write a message first."}, 400
+        if record.status == "frozen":
+            return {"error": "This contract is frozen. Start over to write a new one."}, 409
+        if not contract_store.lock.acquire(blocking=False):
+            return {"error": "Claude is still answering your last message."}, 409
+        try:
+            try:
+                get_assistant().respond(record, text)
+            except AssistantError as error:
+                record.display.append({"role": "assistant", "kind": "error", "text": str(error)})
+                contract_store.save()
+                return {**contract_json(), "error": str(error)}, 502
+            contract_store.save()
+            return contract_json(), 200
+        finally:
+            contract_store.lock.release()
+
+
+    @app.post("/api/contract/approve")
+    def contract_approve() -> tuple[Json, int]:
+        record = contract_store.current()
+        try:
+            record.approve(int((request.get_json(silent=True) or {}).get("scenario", -1)))
+        except (ValueError, TypeError) as error:
+            return {"error": str(error)}, 400
+        contract_store.save()
+        return contract_json(), 200
+
+
+    @app.post("/api/contract/scenario")
+    def contract_scenario() -> tuple[Json, int]:
+        """Save one of the user's scenarios and dry-run it against the contract code."""
+        record = contract_store.current()
+        body = request.get_json(silent=True) or {}
+        try:
+            slot = int(body.get("slot", -1))
+            scenario = parse_scenario(slot, body)
+            names = [party["name"] for party in record.parties]
+            try:
+                result: Json = simulate_scenario(record.code, names, scenario, slot + 1)
+            except ContractProblem as problem:
+                result = {"error": " ".join(problem.problems)}
+            record.set_scenario(slot, scenario, result)
+        except ContractProblem as problem:
+            return {"error": " ".join(problem.problems)}, 400
+        except (ValueError, TypeError) as error:
+            return {"error": str(error)}, 400
+        contract_store.save()
+        return contract_json(), 200
+
+
+    @app.post("/api/contract/scenario/clear")
+    def contract_scenario_clear() -> tuple[Json, int]:
+        try:
+            contract_store.current().set_scenario(int((request.get_json(silent=True) or {}).get("slot", -1)), None, None)
+        except (ValueError, TypeError) as error:
+            return {"error": str(error)}, 400
+        contract_store.save()
+        return contract_json(), 200
+
+
+    @app.post("/api/contract/emails")
+    def contract_emails() -> tuple[Json, int]:
+        try:
+            contract_store.current().set_emails((request.get_json(silent=True) or {}).get("emails", {}))
+        except (ValueError, AttributeError, TypeError) as error:
+            return {"error": str(error)}, 400
+        contract_store.save()
+        return contract_json(), 200
+
+
+    @app.post("/api/contract/freeze")
+    def contract_freeze() -> tuple[Json, int]:
+        try:
+            contract_store.freeze()
+        except ValueError as error:
+            return {"error": str(error)}, 400
+        return contract_json(), 200
+
+
+    @app.post("/api/contract/reset")
+    def contract_reset() -> tuple[Json, int]:
+        if not contract_store.lock.acquire(blocking=False):
+            return {"error": "Claude is still answering; try again in a moment."}, 409
+        try:
+            contract_store.reset()
+            return contract_json(), 200
+        finally:
+            contract_store.lock.release()
 
 
     @app.get("/order")

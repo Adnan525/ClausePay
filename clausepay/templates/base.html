@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ClausePay (demo)</title>
+  <link rel="icon" href="data:,">
   <style>
+    [hidden] { display: none !important; }
     :root { color-scheme: light dark; --edge: #8885; --warn-bg: #fff3cd; --warn-fg: #664d03; --accent: #0b5cd5; --ok: #16794c; --bad: #b42318; }
     body { font-family: system-ui, sans-serif; margin: 0; line-height: 1.5; }
     .demo { background: var(--warn-bg); color: var(--warn-fg); padding: .75rem 1rem; text-align: center; font-weight: 600; }
@@ -24,7 +26,10 @@
     button.secondary { background: transparent; color: inherit; }
     button:disabled { opacity: .5; cursor: default; }
     input { font: inherit; padding: .5rem; border-radius: .5rem; border: 1px solid var(--edge); width: 8rem; }
+    nav .sep { margin-left: auto; align-self: center; font-size: .8rem; opacity: .6; padding-right: .25rem; }
+    nav a.helper { font-size: .95rem; opacity: .85; }
   </style>
+  {% block head %}{% endblock %}
 </head>
 <body>
   <div class="demo">DEMO ONLY &mdash; PayPal sandbox. No real money moves and nothing here is financial advice.</div>
@@ -32,8 +37,10 @@
     <h1>ClausePay</h1>
     <p class="lead">Routes sales between partners and handles refunds, according to a plain-English contract.</p>
     <nav>
-      <a href="/" class="{{ 'active' if active == 'accounts' }}">Accounts</a>
-      <a href="/order" class="{{ 'active' if active == 'order' }}">Order</a>
+      <a href="/" class="{{ 'active' if active == 'contract' }}">Contract</a>
+      <span class="sep">Demo helpers</span>
+      <a href="/accounts" class="helper {{ 'active' if active == 'accounts' }}">Accounts</a>
+      <a href="/order" class="helper {{ 'active' if active == 'order' }}">Order</a>
     </nav>
     {% block content %}{% endblock %}
   </main>

@@ -12,10 +12,10 @@ from typing import Any
 import requests
 from dotenv import find_dotenv, load_dotenv
 
+from clausepay import fees
+from clausepay.fees import CENT, DEFAULT_FEE_RATE, DEFAULT_FIXED_FEE
+
 SANDBOX_URL = "https://api-m.sandbox.paypal.com"
-CENT = Decimal("0.01")
-DEFAULT_FEE_RATE = Decimal("0.024")  # percentage part of PayPal's fee, as charged by the sandbox
-DEFAULT_FIXED_FEE = Decimal("0.30")  # fixed part of PayPal's fee per sale (never returned on refund)
 TIMEOUT_SECONDS = 30
 
 Json = dict[str, Any]
@@ -117,12 +117,12 @@ class PayPalClient:
 
     def percentage_fee(self, amount: Decimal) -> Decimal:
         """The percentage part of PayPal's fee on `amount`, in whole cents (also what a refund returns)."""
-        return (amount * self.fee_rate).quantize(CENT, rounding=ROUND_HALF_UP)
+        return fees.percentage_fee(amount, self.fee_rate)
 
 
     def sale_fee(self, amount: Decimal) -> Decimal:
         """The total fee PayPal takes on a sale of `amount`: percentage part plus the fixed fee."""
-        return self.percentage_fee(amount) + self.fixed_fee
+        return fees.sale_fee(amount, self.fee_rate, self.fixed_fee)
 
 
     def _money(self, amount: Decimal) -> Json:

@@ -1,0 +1,380 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+  .subtabs { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+  .subtab { background: transparent; color: inherit; border: 1px solid var(--edge); border-radius: 2rem; padding: .4rem 1rem; }
+  .subtab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .spacer { flex: 1; }
+  .small { padding: .25rem .7rem; font-size: .85rem; }
+  .chip { font-size: .8rem; border-radius: 1rem; padding: .15rem .6rem; border: 1px solid var(--edge); }
+  .chip.ready { color: var(--ok); border-color: var(--ok); }
+  .chip.frozen { background: var(--ok); color: #fff; border-color: var(--ok); }
+  .chat { border: 1px solid var(--edge); border-radius: .75rem; padding: 1rem; min-height: 16rem; max-height: 32rem; overflow-y: auto; display: flex; flex-direction: column; gap: .75rem; }
+  .bubble { max-width: 85%; padding: .6rem .9rem; border-radius: 1rem; }
+  .bubble p { margin: .25rem 0; } .bubble ul, .bubble ol { margin: .25rem 0; padding-left: 1.3rem; }
+  .bubble.user { align-self: flex-end; background: var(--accent); color: #fff; white-space: pre-wrap; }
+  .bubble.assistant { align-self: flex-start; background: #8881; border: 1px solid var(--edge); }
+  .bubble.error { border-color: var(--bad); color: var(--bad); }
+  .bubble.draft { border-color: var(--ok); }
+  .typing { display: flex; gap: .75rem; align-items: center; }
+  .spinner { width: 1.2rem; height: 1.2rem; border: 3px solid var(--edge); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+  .welcome { opacity: .85; } .welcome h2 { margin-top: 0; }
+  .banner { margin: .75rem 0; padding: .6rem .9rem; border: 1px solid var(--ok); color: var(--ok); border-radius: .75rem; display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+  form#composer { margin-top: .75rem; }
+  textarea { width: 100%; box-sizing: border-box; font: inherit; padding: .6rem; border-radius: .6rem; border: 1px solid var(--edge); resize: vertical; background: transparent; color: inherit; }
+  .row { display: flex; gap: .5rem; margin-top: .5rem; align-items: center; flex-wrap: wrap; }
+  .review h2 { margin: 1.5rem 0 .5rem; font-size: 1.15rem; }
+  .parties { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .party { border: 1px solid var(--edge); border-radius: .6rem; padding: .3rem .7rem; font-size: .9rem; }
+  details pre { overflow-x: auto; background: #8881; padding: .75rem; border-radius: .6rem; font-size: .8rem; }
+  .scenario { border: 1px solid var(--edge); border-radius: .75rem; padding: 1rem; margin-bottom: 1rem; }
+  .scenario.approved { border-color: var(--ok); }
+  .scenario h3 { margin: 0; } .scenario .why { opacity: .8; margin: .2rem 0 .8rem; }
+  .step { border-left: 3px solid var(--accent); padding: .2rem 0 .2rem .8rem; margin: .8rem 0; }
+  .step.refund { border-left-color: #b54708; }
+  .step h4 { margin: 0 0 .3rem; font-size: .95rem; }
+  .step ul { margin: 0; padding-left: 1.2rem; font-size: .92rem; }
+  .step .check { opacity: .65; }
+  .step .note { font-style: italic; opacity: .85; margin: .3rem 0 0; font-size: .88rem; }
+  table.totals { border-collapse: collapse; margin-top: .5rem; font-size: .9rem; }
+  table.totals td { padding: .15rem 1rem .15rem 0; } table.totals td:first-child { opacity: .75; }
+  .approvebar { position: sticky; bottom: 0; background: Canvas; border-top: 1px solid var(--edge); padding: .75rem 0; display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+  button.ok { background: var(--ok); }
+  .frozenbox { border: 2px solid var(--ok); border-radius: .75rem; padding: 1rem; }
+  .mono { font-family: ui-monospace, monospace; font-size: .8rem; word-break: break-all; }
+  .evrow { display: flex; gap: .5rem; align-items: center; margin: .35rem 0; flex-wrap: wrap; }
+  .evrow input { width: 9rem; } .evrow input.num { width: 3.5rem; }
+  .evtype { font-size: .8rem; font-weight: 600; border-radius: .4rem; padding: .1rem .5rem; min-width: 3.4rem; text-align: center; }
+  .evtype.sale { background: #0b5cd51f; color: var(--accent); } .evtype.refund { background: #b547081f; color: #b54708; }
+  input.title { width: 16rem; font-weight: 600; }
+  .emailrow { display: flex; justify-content: space-between; gap: 1rem; align-items: center; border: 1px solid var(--edge); border-radius: .6rem; padding: .5rem .8rem; margin-bottom: .5rem; flex-wrap: wrap; }
+  .emailrow .role { margin: 0; } input.email-input { width: 26rem; max-width: 100%; }
+  .bad { color: var(--bad); } .ok-text { color: var(--ok); }
+  .problem { border: 1px solid var(--bad); border-radius: .6rem; padding: .6rem .8rem; margin-top: .6rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="subtabs">
+  <button class="subtab active" data-tab="chat" type="button">1 &middot; Chat</button>
+  <button class="subtab" data-tab="review" id="review-tab" type="button">2 &middot; Review &amp; approve</button>
+  <span id="status-chip" class="chip"></span>
+  <span class="spacer"></span>
+  <button class="secondary small" id="reset" type="button">Start over</button>
+</div>
+
+<section id="panel-chat">
+  <div id="chat" class="chat" aria-live="polite"></div>
+  <div id="ready-banner" class="banner" hidden>
+    <span>The contract code is ready. Add the emails and try it on your own scenarios before it is frozen.</span>
+    <button id="go-review" type="button">Review &amp; approve &rarr;</button>
+  </div>
+  <form id="composer">
+    <textarea id="input" rows="5" placeholder="Paste or type your contract in plain English. You can also attach a .txt file."></textarea>
+    <div class="row">
+      <input type="file" id="file" accept=".txt,text/plain" hidden>
+      <button type="button" class="secondary" id="attach">Attach .txt</button>
+      <button type="button" class="secondary" id="example">Try an example</button>
+      <span class="spacer"></span>
+      <span id="busy-note" class="role"></span>
+      <button type="submit" id="send">Send</button>
+    </div>
+  </form>
+</section>
+
+<section id="panel-review" class="review" hidden></section>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let state = null;
+  let pending = false;
+  let lastSeenVersion = 0;
+
+  const EXAMPLE = "Alice and Bob are developers selling an app and splitting the sales 60/40. Alice put in A$2,000 to build it, " +
+    "so she gets paid back first before the split starts. Refunds should be handled fairly between them.";
+
+  // ---------- helpers ----------
+  function el(tag, attrs, ...children) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(attrs || {})) {
+      if (key === "class") node.className = value; else if (key === "text") node.textContent = value; else node.setAttribute(key, value);
+    }
+    for (const child of children.flat()) if (child != null) node.append(child);
+    return node;
+  }
+  function escapeHtml(text) { return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  function inline(text) { return text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`(.+?)`/g, "<code>$1</code>"); }
+  // Tiny markdown: paragraphs, bullet and numbered lists, **bold**, `code`. Everything is escaped first.
+  function markdown(text) {
+    const out = []; let list = null, para = [];
+    const flushPara = () => { if (para.length) { out.push("<p>" + para.join("<br>") + "</p>"); para = []; } };
+    const flushList = () => { if (list) { out.push("<" + list.tag + ">" + list.items.map((i) => "<li>" + i + "</li>").join("") + "</" + list.tag + ">"); list = null; } };
+    for (const raw of escapeHtml(text).split("\n")) {
+      const bullet = raw.match(/^\s*[-*•] (.*)/), number = raw.match(/^\s*\d+[.)] (.*)/);
+      if (bullet || number) {
+        flushPara();
+        const tag = bullet ? "ul" : "ol";
+        if (list && list.tag !== tag) flushList();
+        list = list || { tag, items: [] };
+        list.items.push(inline((bullet || number)[1]));
+      } else if (!raw.trim()) { flushPara(); flushList(); }
+      else { flushList(); para.push(inline(raw)); }
+    }
+    flushPara(); flushList();
+    return out.join("");
+  }
+  async function api(path, body) {
+    try {
+      const response = await fetch(path, body === undefined ? {} : {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await response.json().catch(() => ({ error: "Unexpected reply from the server." }));
+      return { ok: response.ok, data };
+    } catch (error) {
+      return { ok: false, data: { error: "Lost the connection to the server. If Claude was still working, reload the page in a minute to see the result." } };
+    }
+  }
+  const aud = (value) => "A$" + Number(value).toLocaleString("en-AU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  // ---------- chat ----------
+  function renderChat() {
+    const chat = $("chat");
+    chat.replaceChildren();
+    if (!state.display.length && !pending) {
+      chat.append(el("div", { class: "welcome" },
+        el("h2", { text: "Tell me about your deal" }),
+        el("p", { text: "Describe how sales money should be shared in plain English: who gets what, in what order, how fees and refunds work. I'll ask about anything unclear, then write the rules and show you worked examples to approve." }),
+        el("p", { text: "Nothing here moves real money. It is a PayPal sandbox demo." })));
+    }
+    for (const message of state.display) {
+      const bubble = el("div", { class: "bubble " + message.role + (message.kind ? " " + message.kind : "") });
+      if (message.role === "assistant") bubble.innerHTML = markdown(message.text); else bubble.textContent = message.text;
+      chat.append(bubble);
+    }
+    if (pending) chat.append(el("div", { class: "bubble assistant typing" }, el("span", { class: "spinner", "aria-hidden": "true" }),
+      el("div", {}, el("strong", { text: "Fixing up your contract…" }),
+        el("div", { class: "role", text: "Claude is reading it, writing the rules, and testing them against its own worked examples. If a test disagrees, it fixes the rules itself. This can take a minute or two." }))));
+    chat.scrollTop = chat.scrollHeight;
+    const frozen = state.status === "frozen";
+    $("input").disabled = pending || frozen;
+    $("send").disabled = pending || frozen;
+    $("busy-note").textContent = frozen ? "Frozen. Start over to write a new contract." : "";
+    $("ready-banner").hidden = state.status !== "ready";
+  }
+
+  async function send(text) {
+    pending = true;
+    state.display.push({ role: "user", text });
+    renderChat();
+    const { data } = await api("/api/contract/message", { text });
+    pending = false;
+    if (data.display) state = data; else state.display.push({ role: "assistant", kind: "error", text: data.error || "Something went wrong." });
+    render();
+  }
+
+  // ---------- review ----------
+  const drafts = {};      // slot -> { title, events: [{type, amount, sale_number}] } as typed, saved or not
+  const dirty = {};       // slot -> true when the typed scenario differs from the last run
+  let emailDrafts = null; // party name -> typed email
+  let emailMessage = "";
+  let versionOfDrafts = 0;
+
+  function draftFor(slot) {
+    if (!drafts[slot]) {
+      const saved = state.scenarios[slot];
+      drafts[slot] = saved ? { title: saved.title, events: saved.events.map((e) => ({ ...e })) } : { title: "", events: [] };
+    }
+    return drafts[slot];
+  }
+  function stepNode(step) {
+    const lines = step.lines.map((line) => el("li", { class: line.startsWith("Check:") ? "check" : "", text: line }));
+    return el("div", { class: "step " + step.kind },
+      el("h4", { text: step.heading }), el("ul", {}, lines),
+      step.notes.map((note) => el("p", { class: "note", text: "Contract note: " + note })));
+  }
+  function totalsNode(totals) {
+    const rows = [["Buyers paid", aud(totals.buyers_paid)], ["PayPal fees kept (net of refunded fees)", aud(totals.paypal_fees_kept)], ["Refunded to buyers", aud(totals.refunded)]];
+    for (const [name, value] of Object.entries(totals.paid_out)) rows.push(["Paid out to " + name, aud(value)]);
+    for (const [name, value] of Object.entries(totals.transferred_in)) rows.push([name + " transferred in for refunds", aud(value)]);
+    rows.push(["Reserve held at the end", aud(totals.reserve_at_end)]);
+    return el("table", { class: "totals" }, rows.map(([label, value]) => el("tr", {}, el("td", { text: label }), el("td", { text: value }))));
+  }
+
+  function eventRow(slot, index, locked) {
+    const event = draftFor(slot).events[index];
+    const touch = () => { dirty[slot] = true; };
+    const amount = el("input", { value: event.amount === "full" ? "" : event.amount, inputmode: "decimal", autocomplete: "off",
+      placeholder: event.type === "sale" ? "e.g. 100.00" : "empty = full refund", "aria-label": "Amount in A$" });
+    amount.addEventListener("input", () => { event.amount = amount.value.trim(); touch(); });
+    const kids = [el("span", { class: "evtype " + event.type, text: event.type === "sale" ? "Sale" : "Refund" }), el("span", { text: "A$" }), amount];
+    if (event.type === "refund") {
+      const which = el("input", { value: event.sale_number || "", inputmode: "numeric", class: "num", autocomplete: "off", "aria-label": "Which sale" });
+      which.addEventListener("input", () => { event.sale_number = parseInt(which.value, 10) || 0; touch(); });
+      kids.push(el("span", { text: "of sale #" }), which);
+    }
+    const remove = el("button", { type: "button", class: "secondary small", text: "✕", "aria-label": "Remove event" });
+    remove.addEventListener("click", () => { draftFor(slot).events.splice(index, 1); touch(); renderReview(); });
+    if (locked) { amount.disabled = true; remove.disabled = true; }
+    kids.push(remove);
+    return el("div", { class: "evrow" }, kids);
+  }
+
+  function scenarioNode(slot) {
+    const draft = draftFor(slot);
+    const frozen = state.status === "frozen";
+    const saved = state.simulations[slot];
+    const approved = state.approvals.includes(slot);
+    const title = el("input", { class: "title", value: draft.title, placeholder: "Scenario " + (slot + 1) + " name (optional)", autocomplete: "off" });
+    title.addEventListener("input", () => { draft.title = title.value; });  // a name changes no numbers
+    const message = el("p", { class: "role bad", text: "" });
+    const addSale = el("button", { type: "button", class: "secondary small", text: "+ Sale" });
+    const addRefund = el("button", { type: "button", class: "secondary small", text: "+ Refund" });
+    addSale.addEventListener("click", () => { draft.events.push({ type: "sale", amount: "", sale_number: 0 }); dirty[slot] = true; renderReview(); });
+    addRefund.addEventListener("click", () => {
+      const sales = draft.events.filter((e) => e.type === "sale").length;
+      draft.events.push({ type: "refund", amount: "", sale_number: sales ? 1 : 0 }); dirty[slot] = true; renderReview(); });
+    const example = el("button", { type: "button", class: "secondary small", text: "Fill with a typical example" });
+    example.addEventListener("click", () => {
+      draft.events = [{ type: "sale", amount: "100.00", sale_number: 0 }, { type: "sale", amount: "250.00", sale_number: 0 }, { type: "refund", amount: "", sale_number: 1 }];
+      dirty[slot] = true; renderReview(); });
+    const run = el("button", { type: "button", text: "Run & explain" });
+    run.addEventListener("click", async () => {
+      run.disabled = true;
+      const { ok, data } = await api("/api/contract/scenario", { slot, title: draft.title, events: draft.events });
+      if (data.display) { state = data; delete dirty[slot]; render(); } else { message.textContent = data.error || "Could not run this scenario."; run.disabled = false; }
+    });
+    const clear = el("button", { type: "button", class: "secondary small", text: "Clear" });
+    clear.addEventListener("click", async () => {
+      const { data } = await api("/api/contract/scenario/clear", { slot });
+      if (data.display) { state = data; delete drafts[slot]; delete dirty[slot]; render(); }
+    });
+    if (frozen) for (const control of [title, addSale, addRefund, example, run, clear]) control.disabled = true;
+
+    const children = [el("div", { class: "row" }, title, el("span", { class: "spacer" }), saved ? clear : null),
+      el("div", {}, draft.events.map((_, index) => eventRow(slot, index, frozen))),
+      el("div", { class: "row" }, addSale, addRefund, draft.events.length ? null : example, el("span", { class: "spacer" }), run), message];
+    if (saved && dirty[slot]) children.push(el("p", { class: "role", text: "You changed this scenario. Run it again to see the new numbers." }));
+    else if (saved && saved.error) children.push(el("div", { class: "problem" }, el("strong", { text: "The contract could not handle this scenario. " }), el("span", { text: saved.error }),
+      el("p", { class: "role", text: "If the contract is wrong, tell Claude in the chat. If the scenario is wrong, change it and run again." })));
+    else if (saved) {
+      children.push(...saved.steps.map(stepNode), el("h4", { text: "Totals for this scenario" }), totalsNode(saved.totals), el("p"));
+      if (approved) children.push(el("p", { class: "chip ready", text: "✓ Approved" }));
+      else {
+        const approve = el("button", { type: "button", class: "ok", text: "The numbers match what I meant. Approve.", ...(frozen ? { disabled: "" } : {}) });
+        approve.addEventListener("click", async () => {
+          approve.disabled = true;
+          const { data } = await api("/api/contract/approve", { scenario: slot });
+          if (data.display) state = data; render(); });
+        children.push(approve);
+      }
+    }
+    return el("div", { class: "scenario" + (approved ? " approved" : "") }, el("h3", { text: "Scenario " + (slot + 1) }), ...children);
+  }
+
+  function emailForm() {
+    const frozen = state.status === "frozen";
+    if (emailDrafts === null || versionOfDrafts !== state.version) { emailDrafts = { ...state.emails }; versionOfDrafts = state.version; }
+    const rows = state.parties.map((party) => {
+      const input = el("input", { class: "email-input", value: emailDrafts[party.name] || "", type: "email", autocomplete: "off",
+        placeholder: "name@example.com", "aria-label": "PayPal email for " + party.name, ...(frozen ? { disabled: "" } : {}) });
+      input.addEventListener("input", () => { emailDrafts[party.name] = input.value; });
+      return el("div", { class: "emailrow" }, el("div", {}, el("strong", { text: party.name }), el("div", { class: "role", text: party.description })), input);
+    });
+    const message = el("p", { class: "role" + (emailMessage.startsWith("✓") ? " ok-text" : " bad"), text: emailMessage });
+    const save = el("button", { type: "button", text: "Save emails", ...(frozen ? { disabled: "" } : {}) });
+    save.addEventListener("click", async () => {
+      const { data } = await api("/api/contract/emails", { emails: emailDrafts });
+      if (data.display) { state = data; emailMessage = state.emails_complete ? "✓ Emails saved." : "Saved. Some parties still have no email."; versionOfDrafts = state.version; emailDrafts = { ...state.emails }; }
+      else emailMessage = data.error || "Could not save.";
+      render();
+    });
+    const demo = el("button", { type: "button", class: "secondary", text: "Use the demo seller accounts", ...(frozen || !state.demo_emails.length ? { disabled: "" } : {}) });
+    demo.addEventListener("click", () => {
+      state.parties.forEach((party, i) => { if (state.demo_emails[i]) emailDrafts[party.name] = state.demo_emails[i].email; });
+      emailMessage = ""; renderReview();
+    });
+    return el("div", {}, ...rows, el("div", { class: "row" }, save, demo, el("span", { class: "spacer" }), el("span", { class: "chip " + (state.emails_complete ? "ready" : ""), text: state.emails_complete ? "All parties have an email" : "Emails needed" })), message);
+  }
+
+  function renderReview() {
+    const panel = $("panel-review");
+    panel.replaceChildren();
+    if (state.status === "chatting") {
+      panel.append(el("div", { class: "card" }, el("p", { text: "Nothing to review yet. Finish the chat first. When every question is answered I'll write the rules and you can try them on your own scenarios here." })));
+      return;
+    }
+    if (state.frozen) {
+      panel.append(el("div", { class: "frozenbox" }, el("h2", { text: "✓ Contract frozen" }),
+        el("p", { text: "The code below can no longer be changed. Its fingerprint (SHA-256):" }),
+        el("p", { class: "mono", text: state.frozen.sha256 }), el("p", { class: "mono", text: state.frozen.file })));
+    }
+    panel.append(el("h2", { text: "What I understood" }), el("ul", {}, state.summary.map((line) => el("li", { text: line }))),
+      state.internal_checks.length ? el("p", { class: "role ok-text", text: "✓ Before showing you this, ClausePay ran the rules on " + state.internal_checks.length + " of Claude's own worked examples (" + state.internal_checks.join("; ") + ") and the results matched." }) : null,
+      el("details", {}, el("summary", { text: "View the generated code" }), el("pre", { text: state.code })),
+      el("h2", { text: "Who receives the money" }),
+      el("p", { class: "role", text: "Type the PayPal email for each party yourself. The email never goes through Claude, so it cannot be mistyped or changed by the contract text. Every party needs one before you can freeze." }),
+      emailForm(),
+      el("h2", { text: "Test it with your own scenarios" }),
+      el("p", { class: "role", text: "Add sales and refunds the way they might really happen, then run them. These are dry runs: arithmetic only, no PayPal call and no balance touched. Every figure is calculated by ClausePay's own checked code; the contract is only asked to split the money. Approve each scenario whose numbers match what you meant." }),
+      ...[0, 1, 2].map(scenarioNode));
+    const count = state.approvals.length, need = state.approvals_needed;
+    const missing = [];
+    if (count < need) missing.push((need - count) + " more scenario approval" + (need - count > 1 ? "s" : ""));
+    if (!state.emails_complete) missing.push("an email for every party");
+    const freeze = el("button", { type: "button", class: "ok", text: "Freeze contract", ...(!missing.length && state.status === "ready" ? {} : { disabled: "" }) });
+    freeze.addEventListener("click", async () => {
+      if (!confirm("Freeze this contract? The code cannot be changed afterwards.")) return;
+      const { data } = await api("/api/contract/freeze", {});
+      if (data.display) state = data; render();
+    });
+    panel.append(el("div", { class: "approvebar" },
+      el("strong", { text: state.status === "frozen" ? "Frozen" : count + " of " + need + " scenarios approved" }),
+      state.status === "frozen" ? null : freeze,
+      el("span", { class: "role", text: state.status === "frozen" ? "" : (missing.length ? "Still needed: " + missing.join(" and ") + "." : "Ready to freeze. Need changes? Tell Claude in the chat; approvals reset when the rules change.") })));
+  }
+
+  // ---------- shell ----------
+  function renderChrome() {
+    const chip = $("status-chip");
+    chip.className = "chip " + state.status;
+    chip.textContent = { chatting: "Drafting", ready: "Ready for review", frozen: "Frozen" }[state.status];
+    $("review-tab").textContent = "2 · Review & approve" + (state.status === "chatting" ? "" : " (" + state.approvals.length + "/" + state.approvals_needed + ")");
+    $("review-tab").disabled = state.status === "chatting";
+  }
+  function show(tab) {
+    for (const button of document.querySelectorAll(".subtab")) button.classList.toggle("active", button.dataset.tab === tab);
+    $("panel-chat").hidden = tab !== "chat";
+    $("panel-review").hidden = tab !== "review";
+  }
+  function render() {
+    renderChrome(); renderChat(); renderReview();
+    if (state.version > lastSeenVersion) { lastSeenVersion = state.version; $("review-tab").animate([{ opacity: .3 }, { opacity: 1 }], { duration: 900, iterations: 2 }); }
+  }
+
+  document.querySelectorAll(".subtab").forEach((button) => button.addEventListener("click", () => show(button.dataset.tab)));
+  $("go-review").addEventListener("click", () => show("review"));
+  $("composer").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = $("input").value.trim();
+    if (!text || pending) return;
+    $("input").value = "";
+    send(text);
+  });
+  $("input").addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) $("composer").requestSubmit(); });
+  $("attach").addEventListener("click", () => $("file").click());
+  $("file").addEventListener("change", async () => {
+    const file = $("file").files[0];
+    if (file) $("input").value = (await file.text()).slice(0, 20000);
+    $("file").value = "";
+  });
+  $("example").addEventListener("click", () => { $("input").value = EXAMPLE; $("input").focus(); });
+  $("reset").addEventListener("click", async () => {
+    if (!confirm("Start over with a new contract? A frozen contract stays saved; an unfrozen draft is discarded.")) return;
+    const { data } = await api("/api/contract/reset", {});
+    if (data.display) { state = data; lastSeenVersion = 0; show("chat"); render(); }
+  });
+
+  api("/api/contract").then(({ data }) => { state = data; lastSeenVersion = data.version; render(); });
+</script>
+{% endblock %}

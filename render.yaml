@@ -4,7 +4,7 @@ services:
     runtime: python
     buildCommand: pip install -r requirements.txt
     # One worker on purpose: demo orders are kept in memory, so every request must reach the same process.
-    startCommand: gunicorn --workers 1 --threads 4 "clausepay.webapp:create_app()"
+    startCommand: gunicorn --workers 1 --threads 4 --timeout 180 "clausepay.webapp:create_app()"
     healthCheckPath: /health
     envVars:
       # Set these in the Render dashboard (sync: false keeps values out of git).
@@ -20,6 +20,9 @@ services:
       - key: buyer_email
         sync: false
       - key: business_email
+        sync: false
+      # Key for the Claude API (the contract chat). Never commit it.
+      - key: claude_key
         sync: false
       # The Webhook ID PayPal shows after you register https://<your-app>.onrender.com/webhooks/paypal
       - key: paypal_webhook_id
