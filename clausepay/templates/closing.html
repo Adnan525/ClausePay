@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ClausePay (demo)</title>
+  <style>body { font-family: system-ui, sans-serif; text-align: center; padding: 3rem 1rem; }</style>
+</head>
+<body>
+  <p><strong>DEMO ONLY</strong> &mdash; PayPal sandbox</p>
+  <p>{{ message }}</p>
+  <script>
+    // Tell the order tab, then try to close this window. If the browser refuses, the message above stays.
+    try { new BroadcastChannel("clausepay").postMessage({ orderId: {{ order_id | tojson }} }); } catch (e) {}
+    setTimeout(() => window.close(), 400);
+  </script>
+</body>
+</html>

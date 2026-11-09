@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid">
+  <section class="card">
+    <h2>Buyer</h2>
+    <p class="role">Pays for a sale. Log in with this account in the PayPal window.</p>
+    {% if buyer.email %}
+      <div class="email" id="buyer-email">{{ buyer.email }}</div>
+      <p><button class="secondary" type="button" id="copy-email">Copy email</button></p>
+    {% else %}
+      <div class="email missing">not configured</div>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>New order</h2>
+    <p class="role">Demo amounts: {{ min_amount }} to {{ max_amount }}.</p>
+    <form id="buy-form">
+      <label>Amount <input id="amount" value="25.00" inputmode="decimal" autocomplete="off"></label>
+      <p><button type="submit" id="buy-button">Get buy link &amp; open PayPal</button></p>
+    </form>
+    <p id="message" class="role" aria-live="polite"></p>
+  </section>
+</div>
+
+<section class="card" id="result" hidden style="margin-top:1rem">
+  <h2 id="result-title"></h2>
+  <p id="result-detail" class="role"></p>
+  <table id="result-table" hidden>
+    <tr><td>Buyer paid</td><td id="r-gross"></td></tr>
+    <tr><td>PayPal fee</td><td id="r-fee"></td></tr>
+    <tr><td><strong>Business account received</strong></td><td id="r-net"></td></tr>
+  </table>
+  <p id="r-check" class="role"></p>
+  <p id="r-webhook" class="role"></p>
+</section>
+
+<script>
+  const form = document.getElementById("buy-form");
+  const button = document.getElementById("buy-button");
+  const message = document.getElementById("message");
+  const result = document.getElementById("result");
+  let popup = null;
+  let timer = null;
+  let webhookDeadline = 0;
+
+  function setText(id, text) { document.getElementById(id).textContent = text; }
+  function money(order, value) { return order.currency + " " + value; }
+
+  function render(order) {
+    result.hidden = false;
+    const table = document.getElementById("result-table");
+    table.hidden = true;
+    setText("r-check", ""); setText("r-webhook", ""); setText("result-detail", "");
+    if (order.status === "created") {
+      setText("result-title", "Waiting for the buyer to pay…");
+      setText("result-detail", "Complete the payment in the PayPal window. It closes by itself when you are done.");
+    } else if (order.status === "cancelled") {
+      setText("result-title", "Payment cancelled");
+    } else if (order.status === "failed") {
+      setText("result-title", "Something went wrong");
+      setText("result-detail", order.error || "");
+    } else if (order.status === "pending") {
+      setText("result-title", "PayPal has the payment but is holding it");
+      setText("result-detail", "Nothing has reached the business account yet.");
+    } else {
+      setText("result-title", "Funds received by the business account");
+      setText("result-detail", "Buyer: " + (order.payer_name || "unknown") + " (" + (order.payer_email || "") + ")");
+      table.hidden = false;
+      setText("r-gross", money(order, order.gross));
+      setText("r-fee", "− " + money(order, order.paypal_fee));
+      setText("r-net", money(order, order.net));
+      setText("r-check", order.fee_matches
+        ? "✓ PayPal's fee matches ClausePay's expected fee (" + money(order, order.expected_fee) + ")."
+        : "⚠ PayPal's fee differs from ClausePay's expected fee (" + money(order, order.expected_fee) + "). A real run would pause here.");
+      if (order.webhook_confirmed) setText("r-webhook", "✓ Confirmed by PayPal webhook.");
+      else if (order.webhook_enabled) setText("r-webhook", "Waiting for PayPal's webhook…");
+      else setText("r-webhook", "Webhook not set up in this environment (PayPal needs a public URL; it works once deployed).");
+    }
+  }
+
+  function finished(order) {
+    if (order.status === "created") return false;
+    if (order.status !== "received") return true;
+    return order.webhook_confirmed || !order.webhook_enabled || Date.now() > webhookDeadline;
+  }
+
+  async function poll(orderId) {
+    const response = await fetch("/api/orders/" + orderId);
+    if (!response.ok) { message.textContent = "Lost track of the order."; return; }
+    const order = await response.json();
+    if (order.status !== "created" && popup && !popup.closed) popup.close();
+    if (order.status === "received" && !webhookDeadline) webhookDeadline = Date.now() + 60000;
+    render(order);
+    if (finished(order)) { clearInterval(timer); button.disabled = false; }
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    message.textContent = "";
+    result.hidden = true;
+    webhookDeadline = 0;
+    clearInterval(timer);
+    const response = await fetch("/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ amount: document.getElementById("amount").value }),
+    });
+    const body = await response.json();
+    if (!response.ok) { message.textContent = body.error; button.disabled = false; return; }
+    popup = window.open(body.approve_url, "paypal-checkout", "width=480,height=760");
+    message.textContent = popup ? "PayPal opened in a new window." : "Your browser blocked the window. ";
+    if (!popup) {
+      const link = document.createElement("a");
+      link.href = body.approve_url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = "Open PayPal checkout";
+      message.appendChild(link);
+    }
+    timer = setInterval(() => poll(body.order_id), 1500);
+    poll(body.order_id);
+  });
+
+  const copy = document.getElementById("copy-email");
+  if (copy) copy.addEventListener("click", () => navigator.clipboard.writeText(document.getElementById("buyer-email").textContent));
+</script>
+{% endblock %}

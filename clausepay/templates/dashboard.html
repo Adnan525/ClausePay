@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid">
+  {% for account in accounts %}
+  <section class="card">
+    <h2>{{ account.label }}</h2>
+    <p class="role">{{ account.role }}</p>
+    {% if account.email %}
+      <div class="email">{{ account.email }}</div>
+    {% else %}
+      <div class="email missing">not configured</div>
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>
+{% endblock %}
