@@ -11,6 +11,8 @@
   .refundbox { border-top: 1px solid var(--edge); margin-top: .75rem; padding-top: .6rem; }
   .refundrow { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-top: .4rem; }
   .refundrow input { width: 9rem; }
+  .walletrow { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: .35rem 0; } .small { padding: .2rem .6rem; font-size: .85rem; }
+  .chip.ready { color: var(--ok); border-color: var(--ok); }
   .done { color: var(--ok); } .warn { color: #b54708; } .ok-text { color: var(--ok); } .bad { color: var(--bad); }
   .state pre, details pre { background: #8881; padding: .6rem; border-radius: .6rem; font-size: .8rem; overflow-x: auto; margin: .4rem 0 0; }
   .demo-note { border: 1px solid #b54708; border-radius: .6rem; padding: .5rem .8rem; margin: 0 0 1rem; font-size: .9rem; }
@@ -51,6 +53,7 @@
     </section>
   </div>
   <section class="card state" id="state-card" style="margin-top:1rem"></section>
+  <section class="card" id="wallets" style="margin-top:1rem"></section>
 
   <h2>Sales</h2>
   <div id="sales"></div>
@@ -65,7 +68,7 @@
 
 <script src="/static/common.js"></script>
 <script>
-  const { el, aud, api, when, refundControls } = window.CP;
+  const { el, aud, api, when, refundControls, walletStrip } = window.CP;
   const $ = (id) => document.getElementById(id);
   let data = null, lastJson = "", timer = null, popup = null;
   const refundUI = {};
@@ -111,7 +114,9 @@
       kids.push(refundControls(sale, ui, () => load(true), renderSales));
       for (const refund of sale.refunds) {
         kids.push(el("details", {}, el("summary", { class: refund.status === "done" ? "done" : "warn", text: "Refund " + aud(refund.amount) + (refund.status === "done" ? " ✓" : " (needs attention)") }),
-          refund.note ? el("p", { class: "warn", text: refund.note }) : null, el("ul", {}, refund.lines.map((line) => el("li", { text: line }))),
+          refund.note ? el("p", { class: "warn", text: refund.note }) : null,
+          Object.values(refund.charges || {}).map((c) => el("p", { class: "role", text: "Charged " + c.party + "'s wallet " + aud(c.charged) + " (PayPal fee " + aud(c.fee) + "), so the business received " + aud(c.received) + " · charge " + c.capture_id })),
+          el("ul", {}, refund.lines.map((line) => el("li", { text: line }))),
           refund.report ? reportNode(refund.report, "Refund report") : null));
       }
     }
@@ -145,6 +150,7 @@
     $("contract-card").replaceChildren(...contractCard(data.contract));
     $("state-card").replaceChildren(...stateCard(data.contract));
     $("webhook-status").textContent = data.webhook_configured ? "✓ PayPal notifications are verified and run through the contract." : "PayPal notifications are not set up here (no paypal_webhook_id). Sales started on this page still run through the contract when the buyer returns.";
+    $("wallets").replaceChildren(el("h2", { text: "Partner wallets" }), el("p", { class: "role", text: "Saved PayPal wallets ClausePay may charge for refund shares. Each partner approves once on PayPal's page." }), walletStrip(data.wallets || [], () => load(true)));
     renderSales(); renderLog(); renderJournal();
   }
   function schedule() {

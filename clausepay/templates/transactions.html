@@ -14,6 +14,8 @@
   .ok-text { color: var(--ok); } .bad { color: var(--bad); }
   .summary { display: flex; gap: 2rem; flex-wrap: wrap; margin-bottom: 1rem; }
   .summary div { min-width: 8rem; } .summary strong { display: block; font-size: 1.3rem; }
+  .walletrow { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: .35rem 0; }
+  .small { padding: .2rem .6rem; font-size: .85rem; } .chip.ready { color: var(--ok); border-color: var(--ok); }
 </style>
 {% endblock %}
 
@@ -25,13 +27,14 @@
 
 <div id="main" hidden>
   <div class="summary" id="summary"></div>
+  <section class="card" id="wallets" style="margin-bottom:1rem"></section>
   <p class="role">Every sale that PayPal reports is recorded here, and the partners are paid automatically in the background. To undo a sale, use Refund. Everything that happens behind the scenes can be followed in the <a href="/live">Live sales</a> debugging window.</p>
   <div id="list"></div>
 </div>
 
 <script src="/static/common.js"></script>
 <script>
-  const { el, aud, api, when, refundControls } = window.CP;
+  const { el, aud, api, when, refundControls, walletStrip } = window.CP;
   let data = null, lastJson = "", timer = null;
   const refundUI = {};
   const LABELS = { queued: "Queued", paying: "Paying out…", paid_out: "Paid out", attention: "Needs attention", failed: "Failed, nobody was paid" };
@@ -47,6 +50,9 @@
   }
 
   function render() {
+    document.getElementById("wallets").replaceChildren(el("h2", { text: "Partner wallets" }),
+      el("p", { class: "role", text: "When a refund needs money from the partners, their share is charged to their saved PayPal wallet automatically (they pay PayPal's fee on that charge). Each partner authorizes once." }),
+      walletStrip(data.wallets || [], () => load(true)));
     const sales = data.sales;
     const received = sales.reduce((sum, s) => sum + Number(s.gross || 0), 0);
     const refunded = sales.reduce((sum, s) => sum + Number(s.refunded || 0), 0);

@@ -152,7 +152,7 @@ def sale_facts(entry: dict[str, Any], parties: list[str]) -> Facts:
     return facts
 
 
-def refund_facts(entry: dict[str, Any], parties: list[str]) -> Facts:
+def refund_facts(entry: dict[str, Any], parties: list[str], charges: dict[str, Any] | None = None) -> Facts:
     facts = Facts("refund")
     amount, returned = entry["amount"], entry["fee"]
     facts.add("refund_amount", amount, "what was refunded to the buyer", "Refunded to the buyer")
@@ -166,6 +166,13 @@ def refund_facts(entry: dict[str, Any], parties: list[str]) -> Facts:
                   f"what {name} must transfer into the business account for this refund", f"{name} transfers in")
     facts.flags.append("The partners must transfer money in: " + ", ".join(sorted(owing)) + "." if owing
                        else "No partner has to transfer anything; the reserve covered it.")
+    if charges:
+        facts.flags.append("Each partner's share was collected automatically from their saved PayPal wallet, and each partner "
+                           "paid PayPal's fee on their own charge, so the business received their exact share.")
+        for name in parties:
+            if name in charges:
+                facts.add(f"charged_{slug(name)}", Decimal(charges[name]["charged"]), f"what {name}'s wallet was charged, including PayPal's fee on that charge",
+                          f"{name}'s wallet charged")
     facts.add("reserve_after", entry["reserve_after"], "the reserve after this refund", "Held back in total now")
     _state_changes(facts, entry.get("state_before", {}), entry["state_after"])
     facts.notes = entry["notes"]
@@ -279,7 +286,11 @@ class ReportService:
             entry = self._entry(sale.entry_id if kind == "sale" and sale else f"refund:{refund_id}") if sale else None
             if sale is None or entry is None:
                 continue
-            facts = sale_facts(entry, parties) if kind == "sale" else refund_facts(entry, parties)
+            if kind == "sale":
+                facts = sale_facts(entry, parties)
+            else:
+                record = next(r for r in sale.refunds if r["refund_id"] == refund_id)
+                facts = refund_facts(entry, parties, record.get("charges") or None)
             subject, paragraphs, source = self.get_writer().write(facts, summary, parties)
             title = f"Sale report: {money(entry['amount'])}" if kind == "sale" else f"Refund report: {money(entry['amount'])}"
             report = render(facts, subject, paragraphs, source, emails, title)

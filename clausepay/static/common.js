@@ -30,6 +30,7 @@
     if (Number(sale.refunded) > 0) {
       box.append(el("div", { class: "role", text: "Refunded " + aud(sale.refunded) + " of " + aud(sale.gross) + (left > 0 ? ". " + aud(sale.refundable) + " left to refund." : ". Fully refunded.") }));
     }
+    const stuck = (sale.refunds || []).find((refund) => refund.status === "collecting");
     if (left <= 0) return box;
     const go = async (confirmed) => {
       ui.request_id = ui.request_id || newId();
@@ -37,9 +38,16 @@
       const { ok, data } = await api("/api/live/sales/" + sale.order_id + "/refund", { amount: ui.amount.trim(), request_id: ui.request_id, partners_confirmed: confirmed });
       if (data.needs_partner_transfer) { ui.needs = data.needs_partner_transfer; ui.message = ""; }
       else if (ok) { ui.amount = ""; ui.request_id = null; ui.needs = null; ui.open = false; ui.message = "✓ Refunded."; }
-      else { ui.message = data.error || "Could not refund."; ui.needs = null; ui.request_id = null; }
+      else { ui.message = data.error || "Could not refund."; ui.needs = null; if (!data.keep_request) ui.request_id = null; }  // a half-finished refund keeps its id, so retrying never charges twice
       await reload();
     };
+    if (stuck) {
+      const resume = el("button", { type: "button", text: "Retry this refund" });
+      resume.addEventListener("click", () => { ui.request_id = stuck.request_id; ui.amount = ""; go(!!stuck.partners_confirmed); });
+      box.append(el("div", { class: "demo-note" }, el("strong", { text: "A refund of " + aud(stuck.amount) + " stopped half-way. " }),
+        el("span", { text: (stuck.note || "") + " Retrying is safe: anyone already charged is not charged again." }), el("div", {}, resume)));
+      return box;
+    }
     if (!ui.open) {
       const open = el("button", { type: "button", class: "secondary", text: "Refund…" });
       open.addEventListener("click", () => { ui.open = true; ui.message = ""; rerender(); });
@@ -54,16 +62,46 @@
       box.append(el("div", { class: "refundrow" }, el("span", { text: "A$" }), amount, refund, cancel));
     }
     if (ui.needs) {
-      const confirm = el("button", { type: "button", class: "ok", text: "Demo: partners have transferred in. Continue the refund." });
+      const n = ui.needs, auto = n.automatic || [], manual = n.manual || [];
+      const confirm = el("button", { type: "button", class: "ok", text: "Demo: " + manual.join(" and ") + (manual.length > 1 ? " have" : " has") + " transferred in. Continue the refund." });
       confirm.addEventListener("click", () => go(true));
       box.append(el("div", { class: "demo-note" }, el("strong", { text: "Partners must put money in first. " }),
-        el("span", { text: "The contract says this refund (" + aud(ui.needs.amount) + ") is funded " + aud(ui.needs.from_reserve) + " from the reserve and the rest by the partners: " +
-          Object.entries(ui.needs.transfers).map(([name, value]) => name + " " + aud(value)).join(", ") + ". In production ClausePay would collect this from their saved PayPal wallets; here you confirm it." }),
-        el("details", {}, el("summary", { text: "See the working" }), el("ul", {}, ui.needs.lines.map((line) => el("li", { text: line })))), confirm));
+        el("span", { text: "The contract says this refund (" + aud(n.amount) + ") is funded " + aud(n.from_reserve) + " from the reserve and the rest by the partners: " +
+          Object.entries(n.transfers).map(([name, value]) => name + " " + aud(value)).join(", ") + ". " +
+          (auto.length ? auto.join(" and ") + (auto.length > 1 ? "'s wallets are" : "'s wallet is") + " charged automatically. " : "") +
+          (manual.length ? manual.join(" and ") + (manual.length > 1 ? " have" : " has") + " not authorized ClausePay yet: authorize them (Transactions page), or confirm here that they transferred the money themselves (demo)." : "") }),
+        el("details", {}, el("summary", { text: "See the working" }), el("ul", {}, n.lines.map((line) => el("li", { text: line })))), confirm));
     }
     if (ui.message) box.append(el("p", { class: "role " + (ui.message.startsWith("✓") ? "ok-text" : ui.message.endsWith("…") ? "" : "bad"), text: ui.message }));
     return box;
   }
 
-  window.CP = { el, aud, api, newId, when, refundControls };
+  // One row per partner: authorized or not, with a button that opens PayPal's approval page (like a sale does).
+  function walletStrip(wallets, onChange) {
+    const box = el("div", {});
+    for (const wallet of wallets) {
+      const row = el("div", { class: "walletrow" }, el("strong", { text: wallet.name }), el("span", { class: "role", text: wallet.email }));
+      if (wallet.authorized) {
+        const remove = el("button", { type: "button", class: "secondary small", text: "Remove" });
+        remove.addEventListener("click", async () => { await api("/api/wallets/" + encodeURIComponent(wallet.name) + "/remove", {}); onChange(); });
+        row.append(el("span", { class: "chip ready", text: "✓ wallet authorized" }), remove);
+      } else {
+        const button = el("button", { type: "button", text: "Authorize " + wallet.name });
+        const note = el("span", { class: "role" });
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          const { ok, data } = await api("/api/wallets/" + encodeURIComponent(wallet.name) + "/authorize", {});
+          if (!ok) { note.textContent = data.error || "Could not start."; button.disabled = false; return; }
+          const popup = window.open(data.approve_url, "paypal-wallet", "width=480,height=760");
+          note.textContent = popup ? "PayPal opened in a new window. Log in as " + wallet.name + " and approve." : "Your browser blocked the window.";
+          const timer = setInterval(async () => { await onChange(); if (!popup || popup.closed) { clearInterval(timer); button.disabled = false; } }, 2000);
+        });
+        row.append(el("span", { class: "chip", text: "not authorized" }), button, note);
+      }
+      box.append(row);
+    }
+    return box;
+  }
+
+  window.CP = { el, aud, api, newId, when, refundControls, walletStrip };
 })();

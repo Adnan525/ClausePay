@@ -14,9 +14,10 @@ from clausepay.contract_chat import AssistantError, ContractAssistant, scenario_
 from clausepay.contract_runner import PendingTransactionError, RunnerError
 from clausepay.contract_sim import MAX_SALE, ContractProblem, parse_scenario, simulate_scenario
 from clausepay.contract_store import ContractStore
-from clausepay.live import BackgroundWorker, LiveService, LiveStore
+from clausepay.live import BackgroundWorker, LiveService, LiveStore, RetryRefundError
 from clausepay.orders import Order, OrderStore
 from clausepay.reports import ReportService, ReportWriter
+from clausepay.wallets import WalletError, WalletService, WalletStore
 from clausepay.paypal_client import Json, PayPalClient, PayPalError
 
 MIN_AMOUNT = Decimal("1.00")
@@ -72,7 +73,9 @@ def create_app(
         return paypal[0]
 
 
-    live = LiveService(lambda: get_client(), live_store, contract_store.directory / "frozen")
+    wallets = WalletService(lambda: get_client(), WalletStore(contract_store.directory / "wallets.json"),
+                            lambda: (live.runner().emails if live.runner() else {}))  # `live` is defined just below
+    live = LiveService(lambda: get_client(), live_store, contract_store.directory / "frozen", wallets)
 
 
     def get_report_writer() -> ReportWriter:
@@ -361,7 +364,7 @@ def create_app(
     def live_state() -> Json:
         live.reconcile()
         return {**live.public(), "log": list(reversed(live_store.entries())), "webhook_configured": bool(webhook_id()),
-                "journal": live.journal()}
+                "journal": live.journal(), "wallets": wallets.status()}
 
 
     @app.get("/api/transactions")
@@ -369,7 +372,41 @@ def create_app(
         live.reconcile()
         data = live.public()
         data["sales"] = [sale for sale in data["sales"] if sale["status"] != "created"]  # unpaid orders are not transactions
+        data["wallets"] = wallets.status()
         return data
+
+
+    @app.post("/api/wallets/<party>/authorize")
+    def wallet_authorize(party: str) -> tuple[Json, int]:
+        try:
+            link = wallets.start(party, url_for("wallet_return", _external=True), url_for("wallet_cancel", _external=True))
+        except WalletError as error:
+            return {"error": str(error)}, 400
+        return {"approve_url": link}, 201
+
+
+    @app.post("/api/wallets/<party>/remove")
+    def wallet_remove(party: str) -> tuple[Json, int]:
+        wallets.store.remove(party)
+        live_store.log("wallet", f"{party}'s saved wallet was removed.")
+        return {"wallets": wallets.status()}, 200
+
+
+    @app.get("/wallets/return")
+    def wallet_return() -> tuple[str, int]:
+        setup_id = request.args.get("approval_token_id") or request.args.get("approval_session_id") or ""
+        try:
+            party = wallets.complete(setup_id)
+        except WalletError as error:
+            live_store.log("attention", f"Wallet approval not saved: {error}")
+            return render_template("closing.html", message=str(error), order_id="", keep_open=True), 400
+        live_store.log("wallet", f"{party} authorized ClausePay to charge their PayPal wallet for refund shares.")
+        return render_template("closing.html", message=f"{party}'s PayPal wallet is authorized. You can close this tab.", order_id=""), 200
+
+
+    @app.get("/wallets/cancel")
+    def wallet_cancel() -> tuple[str, int]:
+        return render_template("closing.html", message="Authorization cancelled. You can close this tab.", order_id=""), 200
 
 
     @app.post("/api/live/sales")
@@ -414,6 +451,8 @@ def create_app(
             return live.refund(order_id, amount, request_id, bool(body.get("partners_confirmed"))), 200
         except ValueError as error:
             return {"error": str(error)}, 400
+        except RetryRefundError as error:
+            return {"error": str(error), "keep_request": True}, 409  # the page keeps the request id, so a retry is safe
         except PendingTransactionError as error:
             return {"error": str(error)}, 409
         except RunnerError as error:

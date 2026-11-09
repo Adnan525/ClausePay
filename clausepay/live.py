@@ -9,6 +9,7 @@ is safe to repeat (same request id means the same refund).
 Demo shortcuts, clearly shown to the user: when a refund needs partners to transfer money in,
 the user confirms that the transfer happened (ClausePay does not charge their wallets yet).
 """
+import hashlib
 import json
 import os
 import threading
@@ -23,9 +24,9 @@ from clausepay.contract_runner import (
 )
 from clausepay.orders import first_capture, payer_of
 from clausepay.paypal_client import Json, PayPalClient, PayPalError
+from clausepay.wallets import TOPUP_TAG, WalletError, WalletService
 
 ZERO = Decimal("0.00")
-TOPUP_TAG = "topup"  # payments tagged like this are partners transferring money in, never sales
 FINAL_STATUSES = {"paid_out", "cancelled", "failed", "attention"}
 
 
@@ -152,11 +153,17 @@ def payout_outcome(batch: Json) -> tuple[str, Decimal]:
     return "attention", fee
 
 
+class RetryRefundError(RunnerError):
+    """A refund stopped part-way (for example one partner's wallet could not be charged). Retrying the same request is safe."""
+
+
 class LiveService:
-    def __init__(self, get_client: Callable[[], PayPalClient], store: LiveStore, frozen_dir: Path) -> None:
+    def __init__(self, get_client: Callable[[], PayPalClient], store: LiveStore, frozen_dir: Path,
+                 wallets: WalletService | None = None) -> None:
         self.get_client = get_client
         self.store = store
         self.frozen_dir = frozen_dir
+        self.wallets = wallets
 
 
     # ---- the frozen contract ------------------------------------------------------------
@@ -372,39 +379,68 @@ class LiveService:
     # ---- a refund -----------------------------------------------------------------------
 
     def refund(self, order_id: str, amount: Decimal | None, request_id: str, partners_confirmed: bool) -> dict[str, Any]:
-        """Refund (part of) a sale through PayPal and run it through the contract.
+        """Refund (part of) a sale: collect the partners' shares, refund the buyer through PayPal, record it in the contract.
 
-        Returns {"sale": ...} when done, or {"needs_partner_transfer": ...} when the contract says partners must
-        put money in first and the user has not confirmed that yet. Raises RunnerError for refusals.
+        Partners with an authorized wallet are charged automatically. Anyone without one needs `partners_confirmed`
+        (a demo shortcut). Returns {"sale": ...} when done, or {"needs_partner_transfer": ...} when a confirmation is
+        needed first. Raises RunnerError for refusals, RetryRefundError when it stopped part-way and can be retried.
         """
         with self.store.lock:
             sale = self.store.get(order_id)
             if sale is None or sale.status != "paid_out" or not sale.capture_id:
                 raise RunnerError("Only a sale that has been paid out can be refunded.")
-            if any(refund["request_id"] == request_id for refund in sale.refunds):
+            existing = next((refund for refund in sale.refunds if refund["request_id"] == request_id), None)
+            if existing and existing["status"] != "collecting":
                 return {"sale": self.describe(sale)}  # the same click arriving twice
+            stuck = next((refund for refund in sale.refunds if refund["status"] == "collecting"), None)
+            if stuck and stuck is not existing:
+                raise RunnerError("Another refund of this sale is still being collected. Retry that one first so nobody is charged twice.")
             runner = self.require_runner()
-            left = runner.refundable(sale.capture_id)
-            wanted = left if amount is None else amount
+            wanted = Decimal(existing["amount"]) if existing else (runner.refundable(sale.capture_id) if amount is None else amount)
             quote = runner.quote_refund(sale.capture_id, wanted)  # raises if over-refunding or something is pending
             transfers = {name: value for name, value in quote.amounts.items() if value > 0}
-            if transfers and not partners_confirmed:
-                return {"needs_partner_transfer": {"amount": str(wanted), "transfers": _jsonable(transfers),
-                                                   "from_reserve": str(-quote.reserve_change), "lines": quote.lines}}
+            automatic = [name for name in transfers if self.wallets and self.wallets.is_authorized(name)]
+            manual = [name for name in transfers if name not in automatic]
+            if manual and not partners_confirmed:
+                return {"needs_partner_transfer": {"amount": str(wanted), "transfers": _jsonable(transfers), "automatic": automatic,
+                                                   "manual": manual, "from_reserve": str(-quote.reserve_change), "lines": quote.lines}}
+            record = existing or {"request_id": request_id, "refund_id": "", "amount": str(wanted), "status": "collecting", "note": "",
+                                  "lines": [], "notes": [], "transfers": _jsonable(transfers), "partners_confirmed": bool(manual), "charges": {}}
+            if existing is None:
+                sale.refunds.append(record)
+            self._collect(sale, record, transfers, automatic, request_id)
             client = self.get_client()
             try:
                 response = client.refund_capture(sale.capture_id, wanted, request_id=request_id)
                 details = client.get_refund(response["id"])
             except PayPalError as error:
-                raise RunnerError(f"PayPal did not refund the buyer (error {error.status}). Nothing was recorded.") from None
-            record: dict[str, Any] = {"request_id": request_id, "refund_id": response["id"], "amount": str(wanted),
-                                      "status": "attention", "note": "", "lines": [], "notes": [],
-                                      "transfers": _jsonable(transfers), "partners_confirmed": bool(transfers)}
-            sale.refunds.append(record)
+                record["note"] = f"The partners' money was collected, but PayPal did not refund the buyer (error {error.status})."
+                self.store.save()
+                raise RetryRefundError(f"PayPal did not refund the buyer (error {error.status}). The partners' money is already collected; "
+                                       "trying again will not charge anyone twice.") from None
+            record["refund_id"], record["status"], record["note"] = response["id"], "attention", ""
             self.store.log("refund", f"PayPal refunded {wanted} (refund {record['refund_id']}).", sale.order_id)
             self._record_refund(runner, sale, record, details, wanted)
             self.store.save()
             return {"sale": self.describe(sale)}
+
+
+    def _collect(self, sale: LiveSale, record: dict[str, Any], transfers: dict[str, Decimal], automatic: list[str], request_id: str) -> None:
+        """Charge each partner's wallet for their share, one by one, remembering each charge so a retry never repeats it."""
+        for name in automatic:
+            if record["charges"].get(name, {}).get("status") == "COMPLETED":
+                continue
+            charge_id = hashlib.sha256(f"{request_id}:{name}".encode()).hexdigest()[:40]  # the same refund and partner always give the same id
+            try:
+                result = self.wallets.charge(name, transfers[name], charge_id, request_id)  # type: ignore[union-attr]
+            except WalletError as error:
+                record["note"] = f"{error} Nothing was refunded."
+                self.store.log("attention", f"Collecting for a refund of {record['amount']} stopped: {error}", sale.order_id)
+                self.store.save()
+                raise RetryRefundError(f"{error} Nothing was refunded yet. Try again; anyone already charged will not be charged twice.") from None
+            record["charges"][name] = result
+            self.store.log("charge", f"Charged {name}'s wallet {result['charged']} so the business receives {result['received']} (charge {result['capture_id']}).", sale.order_id)
+            self.store.save()
 
 
     def _record_refund(self, runner: ContractRunner, sale: LiveSale, record: dict[str, Any], details: Json, wanted: Decimal) -> None:

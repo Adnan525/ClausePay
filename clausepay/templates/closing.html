@@ -11,7 +11,7 @@
   <script>
     // Tell the order tab, then try to close this window. If the browser refuses, the message above stays.
     try { new BroadcastChannel("clausepay").postMessage({ orderId: {{ order_id | tojson }} }); } catch (e) {}
-    setTimeout(() => window.close(), 400);
+    {% if not keep_open %}setTimeout(() => window.close(), 400);{% endif %}
   </script>
 </body>
 </html>

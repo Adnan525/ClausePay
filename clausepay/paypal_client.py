@@ -287,13 +287,16 @@ class PayPalClient:
         )
 
 
-    def charge_vaulted(self, vault_id: str, amount: Decimal, custom_id: str | None = None) -> Json:
-        """Charge a saved wallet with no payer clicks. PayPal captures at creation for vaulted sources."""
+    def charge_vaulted(self, vault_id: str, amount: Decimal, custom_id: str | None = None, request_id: str | None = None) -> Json:
+        """Charge a saved wallet with no payer clicks. PayPal captures at creation for vaulted sources.
+
+        The same `request_id` always returns the same charge, so a retry can never charge twice.
+        """
         source: Json = {"paypal": {"vault_id": vault_id}}
-        order = self.create_order(amount, custom_id=custom_id, payment_source=source)
+        order = self.create_order(amount, custom_id=custom_id, payment_source=source, request_id=request_id)
         if order.get("status") == "COMPLETED":
             return order
-        return self.capture_order(order["id"])
+        return self.capture_order(order["id"], request_id=f"{request_id}:capture" if request_id else None)
 
 
     # ---- webhooks -------------------------------------------------------

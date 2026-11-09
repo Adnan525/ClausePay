@@ -7,7 +7,8 @@ import pytest
 
 from clausepay.contract_runner import ContractRunner, RunnerError
 from clausepay.fees import payout_fee, percentage_fee, sale_fee
-from clausepay.live import LiveService, LiveStore, payout_outcome
+from clausepay.live import LiveService, LiveStore, RetryRefundError, payout_outcome
+from clausepay.wallets import WalletService, WalletStore
 from clausepay.paypal_client import PayPalError
 from tests.contracts import REFERENCE_CODE
 from tests.test_contract_runner import EMAILS, RESERVE_CODE, freeze_files
@@ -39,6 +40,11 @@ class FakePayPal:
         self.refund_status = "COMPLETED"
         self.capture_status = "COMPLETED"
         self.custom_ids: dict[str, str] = {}
+        self.setup_payer: dict[str, str] = {}  # setup token -> the PayPal email that "approved" it
+        self.charges: dict[str, dict[str, Any]] = {}  # PayPal-Request-Id -> the charge (PayPal repeats the same answer)
+        self.charge_attempts: list[tuple[str, Decimal]] = []
+        self.declined_vaults: set[str] = set()
+        self.refund_error: PayPalError | None = None
         self.capture_currency = "AUD"
         self.webhook_ok = True
 
@@ -82,6 +88,30 @@ class FakePayPal:
         return self.webhook_ok
 
 
+    def create_vault_setup_token(self, return_url: str, cancel_url: str) -> dict[str, Any]:
+        setup_id = f"SETUP{len(self.setup_payer) + 1}"
+        self.setup_payer[setup_id] = ""
+        return {"id": setup_id, "links": [{"rel": "approve", "href": f"https://paypal.test/approve?session={setup_id}"}]}
+
+
+    def create_vault_payment_token(self, setup_id: str) -> dict[str, Any]:
+        email = self.setup_payer.get(setup_id, "")
+        return {"id": f"VAULT-{setup_id}", "payment_source": {"paypal": {"email_address": email}} if email else {}}
+
+
+    def charge_vaulted(self, vault_id: str, amount: Decimal, custom_id: str | None = None, request_id: str | None = None) -> dict[str, Any]:
+        self.charge_attempts.append((vault_id, amount))
+        if vault_id in self.declined_vaults:
+            raise PayPalError("declined", 422, {})
+        key = request_id or f"anon{len(self.charges)}"
+        if key not in self.charges:  # the same request id returns the same charge, never a second one
+            fee = sale_fee(amount)
+            capture = {"id": f"CHARGE{len(self.charges) + 1}", "status": "COMPLETED", "amount": money(amount), "custom_id": custom_id,
+                       "seller_receivable_breakdown": {"gross_amount": money(amount), "paypal_fee": money(fee), "net_amount": money(amount - fee)}}
+            self.charges[key] = {"status": "COMPLETED", "purchase_units": [{"payments": {"captures": [capture]}}], "custom_id": custom_id}
+        return self.charges[key]
+
+
     def send_payouts(self, payments: dict[str, Decimal], note: str = "") -> dict[str, Any]:
         if self.send_error:
             raise self.send_error
@@ -99,6 +129,8 @@ class FakePayPal:
 
     def refund_capture(self, capture_id: str, amount: Decimal | None = None, note_to_payer: str | None = None,
                        request_id: str | None = None) -> dict[str, Any]:
+        if self.refund_error:
+            raise self.refund_error
         key = request_id or str(len(self.refunds))
         if key not in self.refunds:  # PayPal returns the same refund for the same request id
             self.refunds[key] = {"id": f"REFUND{len(self.refunds) + 1}", "amount": amount, "capture": capture_id}
@@ -117,11 +149,21 @@ def paypal() -> FakePayPal:
     return FakePayPal()
 
 
-def make_service(tmp_path: Path, paypal: FakePayPal, code: str = REFERENCE_CODE) -> LiveService:
+def make_service(tmp_path: Path, paypal: FakePayPal, code: str = REFERENCE_CODE, with_wallets: bool = False) -> LiveService:
     frozen = tmp_path / "frozen"
     frozen.mkdir(exist_ok=True)
     freeze_files(frozen, code)
-    return LiveService(lambda: paypal, LiveStore(tmp_path / "live.json"), frozen)  # type: ignore[arg-type, return-value]
+    wallets = WalletService(lambda: paypal, WalletStore(tmp_path / "wallets.json"), lambda: EMAILS) if with_wallets else None  # type: ignore[arg-type, return-value]
+    return LiveService(lambda: paypal, LiveStore(tmp_path / "live.json"), frozen, wallets)  # type: ignore[arg-type, return-value]
+
+
+def authorize(service: LiveService, paypal: FakePayPal, party: str) -> None:
+    """The partner approves on PayPal's page (as their own account), then PayPal sends them back."""
+    assert service.wallets is not None
+    link = service.wallets.start(party, "https://app/wallets/return", "https://app/wallets/cancel")
+    setup_id = link.rsplit("=", 1)[1]
+    paypal.setup_payer[setup_id] = EMAILS[party]
+    service.wallets.complete(setup_id)
 
 
 @pytest.fixture
@@ -492,3 +534,106 @@ def test_a_partner_top_up_arriving_as_a_payment_is_never_treated_as_a_sale(servi
     assert service.ingest_capture("CAP-TOPUP1", "webhook", "TOPUP1") is None
     assert paypal.payouts == [] and service.store.all() == []
     assert any(line["kind"] == "skipped" and "partner top-up" in line["message"] for line in service.store.entries())
+
+
+# ---------- refunds collect the partners' shares from their saved wallets ----------
+
+@pytest.fixture
+def wallet_service(tmp_path: Path, paypal: FakePayPal) -> LiveService:
+    return make_service(tmp_path, paypal, RESERVE_CODE, with_wallets=True)
+
+
+def test_authorized_partners_are_charged_automatically_and_the_refund_goes_through(wallet_service: LiveService, paypal: FakePayPal) -> None:
+    order_id = paid_800(wallet_service, paypal)
+    authorize(wallet_service, paypal, "Alice"), authorize(wallet_service, paypal, "Bob")
+    result = wallet_service.refund(order_id, d("400.00"), "request-0001", False)  # no confirmation step needed
+    refund = result["sale"]["refunds"][0]
+    assert refund["status"] == "done" and sorted(refund["charges"]) == ["Alice", "Bob"] and len(paypal.refunds) == 1
+    alice = refund["charges"]["Alice"]
+    assert alice["received"] == "156.18" and Decimal(alice["charged"]) > d("156.18")  # she paid PayPal's fee on her own charge
+    assert Decimal(alice["charged"]) - Decimal(alice["received"]) == Decimal(alice["fee"])
+    assert any(line["kind"] == "charge" and "Alice" in line["message"] for line in wallet_service.store.entries())
+
+
+def test_each_charge_is_tagged_so_it_is_never_mistaken_for_a_sale(wallet_service: LiveService, paypal: FakePayPal) -> None:
+    order_id = paid_800(wallet_service, paypal)
+    authorize(wallet_service, paypal, "Alice"), authorize(wallet_service, paypal, "Bob")
+    wallet_service.refund(order_id, d("400.00"), "request-0001", False)
+    tags = [charge["custom_id"] for charge in paypal.charges.values()]
+    assert all(tag.startswith("topup:request-0001:") for tag in tags) and {tag.rsplit(":", 1)[1] for tag in tags} == {"Alice", "Bob"}
+    paypal.orders["CHARGE1"] = d("160.00")
+    paypal.custom_ids["CHARGE1"] = tags[0]
+    assert wallet_service.ingest_capture("CAP-CHARGE1", "webhook", "CHARGE1") is None  # PayPal's notification about the charge is ignored
+    assert len(paypal.payouts) == 1  # only the original sale was ever paid out
+
+
+def test_a_partner_without_a_wallet_still_needs_the_manual_confirmation(wallet_service: LiveService, paypal: FakePayPal) -> None:
+    order_id = paid_800(wallet_service, paypal)
+    authorize(wallet_service, paypal, "Alice")
+    asked = wallet_service.refund(order_id, d("400.00"), "request-0001", False)["needs_partner_transfer"]
+    assert asked["automatic"] == ["Alice"] and asked["manual"] == ["Bob"] and paypal.charge_attempts == [] and paypal.refunds == {}
+    done = wallet_service.refund(order_id, d("400.00"), "request-0001", True)["sale"]["refunds"][0]
+    assert sorted(done["charges"]) == ["Alice"] and done["partners_confirmed"] is True and done["status"] == "done"
+    assert len(paypal.charge_attempts) == 1  # only Alice was charged; Bob's was confirmed by hand
+
+
+def test_a_refund_that_needs_no_partner_money_charges_nobody(wallet_service: LiveService, paypal: FakePayPal) -> None:
+    order_id = paid_800(wallet_service, paypal)
+    authorize(wallet_service, paypal, "Alice"), authorize(wallet_service, paypal, "Bob")
+    refund = wallet_service.refund(order_id, d("20.00"), "request-0001", False)["sale"]["refunds"][0]  # the reserve covers it
+    assert refund["status"] == "done" and refund["charges"] == {} and paypal.charge_attempts == []
+
+
+def test_a_declined_wallet_stops_the_refund_and_a_retry_never_charges_anyone_twice(wallet_service: LiveService, paypal: FakePayPal) -> None:
+    order_id = paid_800(wallet_service, paypal)
+    authorize(wallet_service, paypal, "Alice"), authorize(wallet_service, paypal, "Bob")
+    paypal.declined_vaults.add("VAULT-SETUP2")  # Bob's wallet
+    with pytest.raises(RetryRefundError, match="Bob's wallet could not be charged"):
+        wallet_service.refund(order_id, d("400.00"), "request-0001", False)
+    record = wallet_service.store.get(order_id).refunds[0]  # type: ignore[union-attr]
+    assert record["status"] == "collecting" and list(record["charges"]) == ["Alice"] and paypal.refunds == {}
+    paypal.declined_vaults.clear()  # Bob tops up his PayPal balance
+    done = wallet_service.refund(order_id, None, "request-0001", False)["sale"]["refunds"][0]  # the same request resumes
+    assert done["status"] == "done" and sorted(done["charges"]) == ["Alice", "Bob"] and len(paypal.refunds) == 1
+    assert [vault for vault, _ in paypal.charge_attempts].count("VAULT-SETUP1") == 1  # Alice was charged exactly once
+    assert len(paypal.charges) == 2
+
+
+def test_nothing_else_can_be_refunded_while_a_refund_is_half_collected(wallet_service: LiveService, paypal: FakePayPal) -> None:
+    order_id = paid_800(wallet_service, paypal)
+    authorize(wallet_service, paypal, "Alice"), authorize(wallet_service, paypal, "Bob")
+    paypal.declined_vaults.add("VAULT-SETUP2")
+    with pytest.raises(RetryRefundError):
+        wallet_service.refund(order_id, d("400.00"), "request-0001", False)
+    with pytest.raises(RunnerError, match="still being collected"):
+        wallet_service.refund(order_id, d("100.00"), "request-0002", False)  # a different click must not charge again
+    assert len(paypal.charges) == 1
+
+
+def test_if_paypal_will_not_refund_after_collecting_the_retry_does_not_recollect(wallet_service: LiveService, paypal: FakePayPal) -> None:
+    order_id = paid_800(wallet_service, paypal)
+    authorize(wallet_service, paypal, "Alice"), authorize(wallet_service, paypal, "Bob")
+    paypal.refund_error = PayPalError("busy", 503, {})
+    with pytest.raises(RetryRefundError, match="already collected"):
+        wallet_service.refund(order_id, d("400.00"), "request-0001", False)
+    paypal.refund_error = None
+    done = wallet_service.refund(order_id, None, "request-0001", False)["sale"]["refunds"][0]
+    assert done["status"] == "done" and len(paypal.charges) == 2 and len(paypal.charge_attempts) == 2
+
+
+def test_a_finished_refund_clicked_again_charges_nobody(wallet_service: LiveService, paypal: FakePayPal) -> None:
+    order_id = paid_800(wallet_service, paypal)
+    authorize(wallet_service, paypal, "Alice"), authorize(wallet_service, paypal, "Bob")
+    wallet_service.refund(order_id, d("400.00"), "request-0001", False)
+    wallet_service.refund(order_id, d("400.00"), "request-0001", False)
+    assert len(paypal.charge_attempts) == 2 and len(paypal.refunds) == 1
+
+
+def test_the_refund_report_says_the_shares_were_collected_automatically(wallet_service: LiveService, paypal: FakePayPal) -> None:
+    from clausepay.reports import ReportService, ReportWriter
+    order_id = paid_800(wallet_service, paypal)
+    authorize(wallet_service, paypal, "Alice"), authorize(wallet_service, paypal, "Bob")
+    wallet_service.refund(order_id, d("400.00"), "request-0001", False)
+    ReportService(wallet_service, lambda: ReportWriter(None)).generate_pending()
+    figures = dict(map(tuple, wallet_service.store.get(order_id).refunds[0]["report"]["figures"]))  # type: ignore[union-attr]
+    assert "Alice's wallet charged" in figures and figures["Alice transfers in"] == "A$156.18"

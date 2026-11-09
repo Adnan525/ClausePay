@@ -611,3 +611,84 @@ def test_a_refund_notification_is_logged_but_not_run_through_the_contract(live_c
     assert response.status_code == 200 and response.get_json() == {"ignored": "PAYMENT.CAPTURE.REFUNDED"}
     log = client.get("/api/live").get_json()["log"]
     assert any(line["kind"] == "refund" and "outside ClausePay" in line["message"] for line in log)
+
+
+# ---------- partner wallets (routes) ----------
+
+def authorize_over_routes(client: FlaskClient, paypal: Any, party: str, payer: str | None = None) -> Any:
+    link = client.post(f"/api/wallets/{party}/authorize", json={}).get_json()["approve_url"]
+    setup_id = link.rsplit("=", 1)[1]
+    paypal.setup_payer[setup_id] = payer if payer is not None else f"{party.lower()}@example.com"
+    return client.get(f"/wallets/return?approval_token_id={setup_id}&approval_session_id={setup_id}")
+
+
+def test_each_partner_has_an_authorize_button_state(live_client: tuple[FlaskClient, Any]) -> None:
+    client, _ = live_client
+    wallets = client.get("/api/transactions").get_json()["wallets"]
+    assert [(w["name"], w["authorized"]) for w in wallets] == [("Alice", False), ("Bob", False)]
+    assert "walletStrip" in client.get("/static/common.js").get_data(as_text=True)
+    assert "Partner wallets" in client.get("/transactions").get_data(as_text=True)
+
+
+def test_authorizing_a_wallet_opens_paypals_page_and_saves_on_return(live_client: tuple[FlaskClient, Any]) -> None:
+    client, paypal = live_client
+    returned = authorize_over_routes(client, paypal, "Alice")
+    assert returned.status_code == 200 and "Alice&#39;s PayPal wallet is authorized" in returned.get_data(as_text=True)
+    assert "window.close" in returned.get_data(as_text=True)  # the popup closes itself
+    assert {w["name"]: w["authorized"] for w in client.get("/api/transactions").get_json()["wallets"]} == {"Alice": True, "Bob": False}
+    assert any(line["kind"] == "wallet" and "Alice authorized" in line["message"] for line in client.get("/api/live").get_json()["log"])
+
+
+def test_a_wallet_from_the_wrong_paypal_account_is_refused_and_the_page_stays_open(live_client: tuple[FlaskClient, Any]) -> None:
+    client, paypal = live_client
+    returned = authorize_over_routes(client, paypal, "Alice", payer="someone.else@example.com")
+    body = returned.get_data(as_text=True)
+    assert returned.status_code == 400 and "is not Alice" in body and "window.close" not in body  # the problem stays on screen
+    assert client.get("/api/transactions").get_json()["wallets"][0]["authorized"] is False
+
+
+def test_an_unexpected_wallet_approval_is_refused(live_client: tuple[FlaskClient, Any]) -> None:
+    client, _ = live_client
+    assert client.get("/wallets/return?approval_token_id=FORGED").status_code == 400
+    assert client.get("/wallets/return").status_code == 400
+    assert client.post("/api/wallets/Mallory/authorize", json={}).status_code == 400
+
+
+def test_cancelling_and_removing_a_wallet(live_client: tuple[FlaskClient, Any]) -> None:
+    client, paypal = live_client
+    assert client.get("/wallets/cancel").status_code == 200
+    authorize_over_routes(client, paypal, "Alice")
+    removed = client.post("/api/wallets/Alice/remove", json={}).get_json()
+    assert removed["wallets"][0]["authorized"] is False
+
+
+def paid_800_over_routes(client: FlaskClient, paypal: Any) -> str:
+    order_id = client.post("/api/live/sales", json={"amount": "800.00"}).get_json()["order_id"]
+    client.get(f"/live/return?token={order_id}")
+    paypal.payout_status = "SUCCESS"
+    client.get("/api/live")
+    return order_id
+
+
+def test_a_refund_collects_from_authorized_wallets_without_any_confirmation(live_client: tuple[FlaskClient, Any]) -> None:
+    client, paypal = live_client
+    order_id = paid_800_over_routes(client, paypal)
+    authorize_over_routes(client, paypal, "Alice"), authorize_over_routes(client, paypal, "Bob")
+    response = client.post(f"/api/live/sales/{order_id}/refund", json={"amount": "400.00", "request_id": "request-0001"})
+    refund = response.get_json()["sale"]["refunds"][0]
+    assert response.status_code == 200 and refund["status"] == "done" and sorted(refund["charges"]) == ["Alice", "Bob"]
+
+
+def test_a_refund_that_stops_half_way_tells_the_page_to_keep_its_request_id(live_client: tuple[FlaskClient, Any]) -> None:
+    client, paypal = live_client
+    order_id = paid_800_over_routes(client, paypal)
+    authorize_over_routes(client, paypal, "Alice"), authorize_over_routes(client, paypal, "Bob")
+    paypal.declined_vaults.add("VAULT-SETUP2")
+    url = f"/api/live/sales/{order_id}/refund"
+    stopped = client.post(url, json={"amount": "400.00", "request_id": "request-0001"})
+    assert stopped.status_code == 409 and stopped.get_json()["keep_request"] is True and "Bob's wallet" in stopped.get_json()["error"]
+    sale = client.get("/api/transactions").get_json()["sales"][0]
+    assert sale["refunds"][0]["status"] == "collecting" and sale["refunded"] == "0.00"  # nothing was refunded yet
+    paypal.declined_vaults.clear()
+    retried = client.post(url, json={"request_id": "request-0001"})
+    assert retried.status_code == 200 and len(paypal.charges) == 2 and len(paypal.refunds) == 1

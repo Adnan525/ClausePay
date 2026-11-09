@@ -26,6 +26,17 @@ def sale_fee(amount: Decimal, rate: Decimal = DEFAULT_FEE_RATE, fixed: Decimal =
     return percentage_fee(amount, rate) + fixed
 
 
+def gross_for_net(net: Decimal, rate: Decimal = DEFAULT_FEE_RATE, fixed: Decimal = DEFAULT_FIXED_FEE) -> Decimal:
+    """The smallest amount to charge so that, after PayPal's fee on it, at least `net` reaches the business.
+
+    Used when a partner pays the fee on their own transfer: charging exactly their share would leave the business short.
+    """
+    gross = cents((net + fixed) / (1 - rate)) - Decimal("0.05")
+    while gross - sale_fee(gross, rate, fixed) < net:
+        gross += CENT
+    return gross
+
+
 # PayPal charges the sender (the business account) a fee on every payout, on top of the amount sent.
 # The sandbox charged 2% with no cap; the published rate is 2% capped per payout. Both are settings
 # (environment variables `payout_fee_rate` and `payout_fee_cap`), read each time so a .env change applies.
