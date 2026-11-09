@@ -52,6 +52,7 @@
   .emailrow { display: flex; justify-content: space-between; gap: 1rem; align-items: center; border: 1px solid var(--edge); border-radius: .6rem; padding: .5rem .8rem; margin-bottom: .5rem; flex-wrap: wrap; }
   .emailrow .role { margin: 0; } input.email-input { width: 26rem; max-width: 100%; }
   .bad { color: var(--bad); } .ok-text { color: var(--ok); }
+  .discuss { border: 1px dashed var(--edge); border-radius: .6rem; padding: .6rem .8rem; }
   .problem { border: 1px solid var(--bad); border-radius: .6rem; padding: .6rem .8rem; margin-top: .6rem; }
 </style>
 {% endblock %}
@@ -163,11 +164,11 @@
     $("ready-banner").hidden = state.status !== "ready";
   }
 
-  async function send(text) {
+  async function send(text, scenario) {
     pending = true;
-    state.display.push({ role: "user", text });
+    state.display.push({ role: "user", text: scenario == null ? text : "About scenario " + (scenario + 1) + ": " + text });
     renderChat();
-    const { data } = await api("/api/contract/message", { text });
+    const { data } = await api("/api/contract/message", scenario == null ? { text } : { text, scenario });
     pending = false;
     if (data.display) state = data; else state.display.push({ role: "assistant", kind: "error", text: data.error || "Something went wrong." });
     render();
@@ -191,7 +192,7 @@
     const lines = step.lines.map((line) => el("li", { class: line.startsWith("Check:") ? "check" : "", text: line }));
     return el("div", { class: "step " + step.kind },
       el("h4", { text: step.heading }), el("ul", {}, lines),
-      step.notes.map((note) => el("p", { class: "note", text: "Contract note: " + note })));
+      step.notes.map((note) => el("p", { class: "note", text: "How the contract divided it: " + note })));
   }
   function totalsNode(totals) {
     const rows = [["Buyers paid", aud(totals.buyers_paid)], ["PayPal fees kept (net of refunded fees)", aud(totals.paypal_fees_kept)], ["Refunded to buyers", aud(totals.refunded)]];
@@ -256,9 +257,9 @@
       el("div", { class: "row" }, addSale, addRefund, draft.events.length ? null : example, el("span", { class: "spacer" }), run), message];
     if (saved && dirty[slot]) children.push(el("p", { class: "role", text: "You changed this scenario. Run it again to see the new numbers." }));
     else if (saved && saved.error) children.push(el("div", { class: "problem" }, el("strong", { text: "The contract could not handle this scenario. " }), el("span", { text: saved.error }),
-      el("p", { class: "role", text: "If the contract is wrong, tell Claude in the chat. If the scenario is wrong, change it and run again." })));
+      el("p", { class: "role", text: "If the contract is wrong, tell Claude. If the scenario is wrong, change it and run again." }), discussNode(slot)));
     else if (saved) {
-      children.push(...saved.steps.map(stepNode), el("h4", { text: "Totals for this scenario" }), totalsNode(saved.totals), el("p"));
+      children.push(...saved.steps.map(stepNode), el("h4", { text: "Totals for this scenario" }), totalsNode(saved.totals), el("p"), discussNode(slot), el("p"));
       if (approved) children.push(el("p", { class: "chip ready", text: "✓ Approved" }));
       else {
         const approve = el("button", { type: "button", class: "ok", text: "The numbers match what I meant. Approve.", ...(frozen ? { disabled: "" } : {}) });
@@ -270,6 +271,27 @@
       }
     }
     return el("div", { class: "scenario" + (approved ? " approved" : "") }, el("h3", { text: "Scenario " + (slot + 1) }), ...children);
+  }
+
+  const discussOpen = {};  // slot -> true while the "tell Claude" box is open
+  const discussText = {};  // slot -> what the user has typed so far
+
+  function discussNode(slot) {
+    if (state.status === "frozen") return null;
+    const open = el("button", { type: "button", class: "secondary", text: "These numbers aren't what I meant. Tell Claude." });
+    open.addEventListener("click", () => { discussOpen[slot] = !discussOpen[slot]; renderReview(); });
+    if (!discussOpen[slot]) return el("div", { class: "row" }, open);
+    const box = el("textarea", { rows: "3", placeholder: "What did you expect, or what looks wrong? For example: \"I thought the reserve would come after Alice's repayment.\"" });
+    box.value = discussText[slot] || "";
+    box.addEventListener("input", () => { discussText[slot] = box.value; });
+    const sendButton = el("button", { type: "button", text: "Send to Claude" });
+    sendButton.addEventListener("click", () => {
+      const text = (box.value || "").trim();
+      if (!text || pending) return;
+      discussOpen[slot] = false; discussText[slot] = "";
+      show("chat"); send(text, slot);
+    });
+    return el("div", { class: "discuss" }, open, el("p", { class: "role", text: "Claude sees this scenario and its numbers. It will explain how the rules produced them, or change the rules if the contract was misunderstood." }), box, el("div", { class: "row" }, sendButton));
   }
 
   function emailForm() {

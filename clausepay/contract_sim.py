@@ -153,8 +153,8 @@ def _clean_extras(result: Any, where: str) -> tuple[dict[str, Any], list[str]]:
     return result["state"], [note[:300] for note in notes[:10]]
 
 
-def _share(amount: Decimal, whole: Decimal) -> str:
-    return f" ({amount / whole * 100:.1f}% of {aud(whole)})" if whole > 0 else ""
+def _share(amount: Decimal, whole: Decimal, of_what: str) -> str:
+    return f" ({amount / whole * 100:.1f}% of the {aud(whole)} {of_what})" if whole > 0 else ""
 
 
 def _run(code: str, function: str, kwargs: dict[str, Any], where: str) -> Any:
@@ -184,7 +184,7 @@ def _sale_step(code: str, parties: set[str], sale_id: str, amount: Decimal, stat
         f"PayPal keeps {aud(fee)}: {rate * 100:.1f}% of {aud(amount)} is {aud(percentage)}, plus {aud(fixed)} fixed. "
         f"The business account receives {aud(net)}.",
     ]
-    lines += [f"{name} is paid {aud(value)}{_share(value, net)}." for name, value in payouts.items()]
+    lines += [f"{name} is paid {aud(value)}{_share(value, net, 'the business received')}." for name, value in payouts.items()]
     if not payouts:
         lines.append("Nobody is paid out from this sale.")
     if held > 0:
@@ -223,7 +223,7 @@ def _refund_step(code: str, parties: set[str], sale_id: str, amount: Decimal, st
         lines.append(f"{aud(from_reserve)} is taken from the reserve (reserve is now {aud(reserve - from_reserve)}).")
     else:
         lines.append(f"Nothing is taken from the reserve (reserve stays at {aud(reserve)}).")
-    lines += [f"{name} must transfer {aud(value)} into the business account{_share(value, cost)}." for name, value in funding.items()]
+    lines += [f"{name} must transfer {aud(value)} into the business account{_share(value, cost, 'the refund costs the business')}." for name, value in funding.items()]
     if not funding:
         lines.append("No partner has to transfer money in.")
     lines.append(f"Check: transfers {aud(sum(funding.values(), ZERO))} + reserve {aud(from_reserve)} = {aud(cost)} cost.")

@@ -403,3 +403,30 @@ def test_a_missing_claude_key_is_explained(monkeypatch: pytest.MonkeyPatch, tmp_
     app = create_app(contracts=ContractStore(tmp_path))
     response = app.test_client().post("/api/contract/message", json={"text": "hello"})
     assert response.status_code == 502 and "claude_key" in response.get_json()["error"]
+
+
+def test_commenting_on_a_scenario_sends_its_numbers_to_claude_and_a_short_note_to_the_chat(
+        client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    run_scenario(client, 0, [sale("100.00"), refund("", 1)], "Sale then refund")
+    claude.messages.replies.append(question("Here is how the rules produced those numbers..."))
+    state = client.post("/api/contract/message", json={"text": "Alice should get more", "scenario": 0}).get_json()
+    shown = state["display"][-2]["text"]
+    assert shown == 'About scenario 1 ("Sale then refund"): Alice should get more'
+    sent = claude.messages.requests[-1]["messages"][-1]["content"]
+    assert "The buyer pays A$100.00" in sent and "Alice should get more" in sent
+    assert "The buyer pays" not in str(state["display"])
+    assert state["approvals"] == [] and state["status"] == "ready"  # talking does not change the draft
+
+
+def test_commenting_on_an_empty_slot_is_just_a_normal_message(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    claude.messages.replies.append(question("ok"))
+    state = client.post("/api/contract/message", json={"text": "hello", "scenario": 2}).get_json()
+    assert state["display"][-2]["text"] == "hello"
+    assert "[Context" not in claude.messages.requests[-1]["messages"][-1]["content"]
+
+
+def test_a_nonsense_scenario_number_is_refused(client: FlaskClient, claude: FakeClaude) -> None:
+    ready(client, claude)
+    assert client.post("/api/contract/message", json={"text": "hi", "scenario": "x"}).status_code == 400

@@ -9,7 +9,7 @@ from flask import Flask, jsonify, render_template, request, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from clausepay.accounts import load_accounts
-from clausepay.contract_chat import AssistantError, ContractAssistant
+from clausepay.contract_chat import AssistantError, ContractAssistant, scenario_context
 from clausepay.contract_sim import ContractProblem, parse_scenario, simulate_scenario
 from clausepay.contract_store import ContractStore
 from clausepay.orders import Order, OrderStore
@@ -110,8 +110,18 @@ def create_app(
 
     @app.post("/api/contract/message")
     def contract_message() -> tuple[Json, int]:
-        text = str((request.get_json(silent=True) or {}).get("text", "")).strip()
+        body = request.get_json(silent=True) or {}
+        text = str(body.get("text", "")).strip()
         record = contract_store.current()
+        context = ""
+        if body.get("scenario") is not None and text:
+            try:
+                slot = int(body["scenario"])
+            except (TypeError, ValueError):
+                return {"error": "Unknown scenario."}, 400
+            context = scenario_context(record, slot)
+            if context:
+                text = f"About scenario {slot + 1} (\"{record.scenarios[slot]['title']}\"): {text}"
         if not text:
             return {"error": "Write a message first."}, 400
         if record.status == "frozen":
@@ -120,7 +130,7 @@ def create_app(
             return {"error": "Claude is still answering your last message."}, 409
         try:
             try:
-                get_assistant().respond(record, text)
+                get_assistant().respond(record, text, context)
             except AssistantError as error:
                 record.display.append({"role": "assistant", "kind": "error", "text": str(error)})
                 contract_store.save()

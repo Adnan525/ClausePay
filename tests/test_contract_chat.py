@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from clausepay.contract_chat import MODEL, RESPONSE_SCHEMA, SYSTEM_PROMPT, AssistantError, ContractAssistant
+from clausepay.contract_chat import (
+    MODEL, RESPONSE_SCHEMA, SYSTEM_PROMPT, AssistantError, ContractAssistant, scenario_context,
+)
 from clausepay.contract_sim import parse_scenario, simulate_scenario
 from clausepay.contract_store import APPROVALS_NEEDED, SLOTS, ContractRecord, ContractStore
 from tests.contracts import PARTY_NAMES, REFERENCE_CODE, SCENARIOS, reference_submission, refund, sale, with_expected
@@ -309,3 +311,36 @@ def test_reset_starts_a_new_contract_and_keeps_frozen_files(tmp_path: Path) -> N
 def test_public_view_hides_the_hidden_messages() -> None:
     record = ContractRecord(api_messages=[{"role": "user", "content": "secret fix request"}])
     assert "api_messages" not in record.public() and "secret fix request" not in json.dumps(record.public())
+
+
+# ---------- disputing a result ----------
+
+def test_the_scenario_the_user_disputes_is_described_for_claude() -> None:
+    record = drafted()
+    add_scenario(record, 1)  # a sale of 80.00 then a full refund
+    context = scenario_context(record, 1)
+    assert "scenario 2" in context and "sale 80.00; refund full of sale 1" in context
+    assert "The buyer pays A$80.00" in context and "Contract note: Refunds are shared equally." in context
+    assert scenario_context(record, 0) == "" and scenario_context(record, 9) == ""
+
+
+def test_a_failed_scenario_is_described_with_its_error() -> None:
+    record = drafted()
+    record.set_scenario(0, parse_scenario(0, SCENARIOS[0]), {"error": "it broke"})
+    assert "could not handle it: it broke" in scenario_context(record, 0)
+
+
+def test_the_context_goes_to_claude_but_not_into_the_users_chat() -> None:
+    record = drafted()
+    add_scenario(record, 0)
+    claude = FakeClaude([question("Because the reserve comes first...")])
+    ContractAssistant(claude).respond(record, "About scenario 1: I expected more for Alice", scenario_context(record, 0))
+    sent = claude.messages.requests[0]["messages"][-1]["content"]
+    assert "I expected more for Alice" in sent and "[Context for you, not typed by the user" in sent
+    assert record.display[-2]["text"] == "About scenario 1: I expected more for Alice"
+    assert "Context for you" not in json.dumps(record.display)
+
+
+def test_claude_is_told_how_to_handle_disputes_and_how_to_write_notes() -> None:
+    assert "When the user disputes a result" in SYSTEM_PROMPT and "step-by-step walk-through" in SYSTEM_PROMPT
+    assert "Do not change the rules unless the user wants that" in SYSTEM_PROMPT

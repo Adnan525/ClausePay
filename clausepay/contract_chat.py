@@ -76,6 +76,19 @@ example give the last party "total minus everyone else" instead of rounding ever
 - Party names in payouts and funding must be exactly the names in your parties list.
 - Keep the code simple, readable and commented where the contract's rules are applied. Pure functions only.
 
+# Notes that explain the numbers
+Every "notes" entry is shown to the user as the contract's own explanation. Write the notes as a short step-by-step \
+walk-through in the order the contract applies its rules, with the actual amounts, for example: "Reserve: 10% of 780.50 \
+is 78.05, leaving 702.45. Recoupment: 500.00 of that goes to Alice, leaving 202.45. Split 60/40: Alice 121.47, Bob 80.98." \
+Never leave the user to guess where a number came from. For a refund, say where each part of its cost came from.
+
+# When the user disputes a result
+Sometimes the user comments on a scenario they ran. The message then includes a context block with the scenario's events \
+and the results shown. Compare what they expected with what the contract, as agreed, says. If their expectation does not \
+match the agreed contract, explain step by step how the rules produce the numbers shown, then ask whether they want to \
+change the contract. If the contract was ambiguous or you misunderstood it, say so, ask what you need, or send a corrected \
+complete "ready" reply. Do not change the rules unless the user wants that.
+
 # Your reply
 Reply with JSON matching the schema, every time.
 - status "question": you still need something. Put your reply in "message". Leave summary, parties, code and tests empty.
@@ -201,11 +214,14 @@ class ContractAssistant:
             raise AssistantError("Claude's answer was not understandable. Please try again.") from None
 
 
-    def respond(self, record: ContractRecord, user_text: str) -> None:
-        """Add the user's message, get Claude's answer, and update the record (chat, draft, simulations)."""
+    def respond(self, record: ContractRecord, user_text: str, context: str = "") -> None:
+        """Add the user's message, get Claude's answer, and update the record (chat, draft, simulations).
+
+        `context` is extra detail only Claude sees (for example the scenario the user is commenting on).
+        """
         text = user_text.strip()[:MAX_USER_CHARS]
         record.display.append({"role": "user", "text": text})
-        record.api_messages.append({"role": "user", "content": text})
+        record.api_messages.append({"role": "user", "content": text + (f"\n\n{context}" if context else "")})
         for attempt in range(MAX_FIX_ROUNDS + 1):
             data = self._ask_claude(record.api_messages)
             raw = json.dumps(data)
@@ -214,11 +230,7 @@ class ContractAssistant:
                 record.display.append({"role": "assistant", "text": str(data.get("message", "")).strip()})
                 return
             try:
-                submission = parse_submission(data)
-                names = [party["name"] for party in submission.parties]
-                self_test(submission.code, names)
-                checks = run_tests(submission.code, names, submission.tests)
-                simulations = simulate_slots(submission.code, names, record.scenarios)
+                accept_submission(record, data)
             except ContractProblem as problem:
                 record.api_messages.append({"role": "assistant", "content": raw})
                 if attempt == MAX_FIX_ROUNDS:
@@ -228,10 +240,41 @@ class ContractAssistant:
                     return
                 record.api_messages.append({"role": "user", "content": _fix_request(problem.problems)})
                 continue
-            record.set_draft(submission.summary, submission.parties, submission.code, simulations, checks)
             record.api_messages.append({"role": "assistant", "content": raw})
             record.display.append({"role": "assistant", "kind": "draft", "text": str(data.get("message", "")).strip()})
             return
+
+
+def scenario_context(record: ContractRecord, slot: int) -> str:
+    """The user's scenario and the results they saw, written for Claude. Empty if the slot has no scenario."""
+    scenario = record.scenarios[slot] if 0 <= slot < len(record.scenarios) else None
+    result = record.simulations[slot] if scenario is not None else None
+    if scenario is None or result is None:
+        return ""
+    events = "; ".join(
+        f"sale {e['amount']}" if e["type"] == "sale" else f"refund {e['amount']} of sale {e['sale_number']}"
+        for e in scenario["events"])
+    lines = [f"[Context for you, not typed by the user: they are commenting on their test scenario {slot + 1} "
+             f"('{scenario['title']}'). Events: {events}.]"]
+    if "error" in result:
+        lines.append(f"The contract could not handle it: {result['error']}")
+    else:
+        for step in result["steps"]:
+            lines += [step["heading"], *step["lines"], *[f"Contract note: {note}" for note in step["notes"]]]
+    return "\n".join(lines)
+
+
+def accept_submission(record: ContractRecord, data: dict[str, Any]) -> None:
+    """Check a finished contract (shape, safety, built-in checks, its own tests) and make it the record's draft.
+
+    Used for Claude's answers and for the built-in demo contract alike. Raises ContractProblem on any failure.
+    """
+    submission = parse_submission(data)
+    names = [party["name"] for party in submission.parties]
+    self_test(submission.code, names)
+    checks = run_tests(submission.code, names, submission.tests)
+    simulations = simulate_slots(submission.code, names, record.scenarios)
+    record.set_draft(submission.summary, submission.parties, submission.code, simulations, checks)
 
 
 def _fix_request(problems: list[str]) -> str:
