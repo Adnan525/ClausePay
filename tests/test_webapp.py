@@ -251,11 +251,18 @@ def approve_all(client: FlaskClient) -> None:
 EMAILS = {"emails": {"Alice": "alice@example.com", "Bob": "bob@example.com"}}
 
 
-def test_contract_is_the_main_tab_and_the_other_tabs_are_demo_helpers(client: FlaskClient) -> None:
-    home = client.get("/").get_data(as_text=True)
-    assert 'id="panel-chat"' in home and "Review &amp; approve" in home
-    assert 'href="/" class="active"' in home and "Demo helpers" in home
-    assert 'href="/accounts"' in home and 'href="/order"' in home
+def test_contract_and_transactions_are_the_main_app_and_the_rest_are_demo_helpers(client: FlaskClient) -> None:
+    page = client.get("/contract").get_data(as_text=True)
+    assert 'id="panel-chat"' in page and "Review &amp; approve" in page
+    assert 'href="/contract" class="active"' in page and 'href="/transactions"' in page and "Demo helpers" in page
+    assert 'href="/accounts"' in page and 'href="/order"' in page and 'href="/live"' in page
+    main = page.index('href="/transactions"')
+    assert main < page.index("Demo helpers") < page.index('href="/accounts"')  # the helpers come after the main app
+
+
+def test_before_a_contract_is_frozen_the_main_app_opens_on_the_contract(client: FlaskClient) -> None:
+    response = client.get("/")
+    assert response.status_code == 200 and 'id="panel-chat"' in response.get_data(as_text=True)
 
 
 def test_a_new_contract_starts_empty(client: FlaskClient) -> None:
@@ -453,7 +460,8 @@ def test_the_live_page_is_a_demo_helper_tab(client: FlaskClient) -> None:
 
 
 def test_live_has_nothing_to_show_without_a_frozen_contract(client: FlaskClient) -> None:
-    assert client.get("/api/live").get_json() == {"contract": None, "sales": []}
+    live = client.get("/api/live").get_json()
+    assert live["contract"] is None and live["sales"] == [] and live["log"] == [] and live["webhook_configured"] is False
     response = client.post("/api/live/sales", json={"amount": "100.00"})
     assert response.status_code == 409 and "no frozen contract" in response.get_json()["error"]
 
@@ -523,3 +531,83 @@ def test_bad_live_sale_amounts_are_refused(live_client: tuple[FlaskClient, Any])
     client, paypal = live_client
     assert client.post("/api/live/sales", json={"amount": "0.50"}).status_code == 400
     assert paypal.orders == {}
+
+
+
+# ---------- the main app opens on transactions once a contract is frozen ----------
+
+def test_once_a_contract_is_frozen_the_main_app_opens_on_the_transactions(live_client: tuple[FlaskClient, Any]) -> None:
+    client, _ = live_client
+    response = client.get("/")
+    assert response.status_code == 302 and response.headers["Location"].endswith("/transactions")
+    assert client.get("/contract").status_code == 200  # the chat is still one click away
+
+
+def test_the_transactions_page_and_script_are_served(client: FlaskClient) -> None:
+    page = client.get("/transactions").get_data(as_text=True)
+    assert "DEMO ONLY" in page and 'href="/transactions" class="active"' in page and "/static/common.js" in page
+    assert "refundControls" in client.get("/static/common.js").get_data(as_text=True)
+
+
+def test_the_transactions_list_hides_orders_nobody_has_paid(live_client: tuple[FlaskClient, Any]) -> None:
+    client, _ = live_client
+    order_id = client.post("/api/live/sales", json={"amount": "100.00"}).get_json()["order_id"]
+    assert client.get("/api/transactions").get_json()["sales"] == []  # created but unpaid
+    client.get(f"/live/return?token={order_id}")
+    sales = client.get("/api/transactions").get_json()["sales"]
+    assert [sale["status"] for sale in sales] == ["paying"] and sales[0]["created_at"]
+
+
+# ---------- PayPal notifications run the contract ----------
+
+def webhook_body(capture_id: str, order_id: str, event_id: str = "EVT-1", kind: str = "PAYMENT.CAPTURE.COMPLETED") -> dict[str, Any]:
+    return {"id": event_id, "event_type": kind,
+            "resource": {"id": capture_id, "supplementary_data": {"related_ids": {"order_id": order_id}}}}
+
+
+def test_a_verified_sale_notification_runs_the_contract_and_pays_out(live_client: tuple[FlaskClient, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    client, paypal = live_client
+    monkeypatch.setenv("paypal_webhook_id", "WH1")
+    paypal.orders["EXTERNAL1"] = Decimal("300.00")  # a sale ClausePay did not start
+    response = client.post("/webhooks/paypal", json=webhook_body("CAP-EXTERNAL1", "EXTERNAL1"))
+    assert response.status_code == 200 and response.get_json()["live"] == "paying"
+    assert len(paypal.payouts) == 1
+    page = client.get("/api/live").get_json()
+    assert [line["kind"] for line in page["log"]][-1] == "webhook" or "webhook" in [line["kind"] for line in page["log"]]
+    assert page["sales"][0]["order_id"] == "EXTERNAL1"
+
+
+def test_paypal_retrying_the_same_notification_does_no_harm(live_client: tuple[FlaskClient, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    client, paypal = live_client
+    monkeypatch.setenv("paypal_webhook_id", "WH1")
+    paypal.orders["EXTERNAL1"] = Decimal("300.00")
+    client.post("/webhooks/paypal", json=webhook_body("CAP-EXTERNAL1", "EXTERNAL1"))
+    again = client.post("/webhooks/paypal", json=webhook_body("CAP-EXTERNAL1", "EXTERNAL1"))
+    assert again.status_code == 200 and again.get_json()["duplicate"] is True and len(paypal.payouts) == 1
+
+
+def test_a_forged_notification_does_not_run_the_contract(live_client: tuple[FlaskClient, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    client, paypal = live_client
+    monkeypatch.setenv("paypal_webhook_id", "WH1")
+    paypal.webhook_ok = False
+    paypal.orders["EXTERNAL1"] = Decimal("300.00")
+    assert client.post("/webhooks/paypal", json=webhook_body("CAP-EXTERNAL1", "EXTERNAL1")).status_code == 400
+    assert paypal.payouts == [] and client.get("/api/live").get_json()["sales"] == []
+
+
+def test_a_notification_for_a_payment_paypal_cannot_find_asks_for_a_retry(live_client: tuple[FlaskClient, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    from clausepay.paypal_client import PayPalError
+    client, paypal = live_client
+    monkeypatch.setenv("paypal_webhook_id", "WH1")
+    paypal.get_capture = lambda capture_id: (_ for _ in ()).throw(PayPalError("down", 503, {}))  # type: ignore[method-assign]
+    response = client.post("/webhooks/paypal", json=webhook_body("CAP-X", "X"))
+    assert response.status_code == 502  # PayPal retries later; ClausePay did not guess
+
+
+def test_a_refund_notification_is_logged_but_not_run_through_the_contract(live_client: tuple[FlaskClient, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    client, paypal = live_client
+    monkeypatch.setenv("paypal_webhook_id", "WH1")
+    response = client.post("/webhooks/paypal", json=webhook_body("REFUND-1", "X", "EVT-9", "PAYMENT.CAPTURE.REFUNDED"))
+    assert response.status_code == 200 and response.get_json() == {"ignored": "PAYMENT.CAPTURE.REFUNDED"}
+    log = client.get("/api/live").get_json()["log"]
+    assert any(line["kind"] == "refund" and "outside ClausePay" in line["message"] for line in log)

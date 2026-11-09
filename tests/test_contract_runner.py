@@ -35,7 +35,8 @@ def calculate_payout(sale_id, sale_amount, paypal_fee, state):
     new_state = dict(state)
     new_state["recouped"] = recouped + recoup_part
     new_state["reserve"] = reserve + reserve_in
-    return {"payouts": {"Alice": alice, "Bob": bob}, "held_back_change": reserve_in, "state": new_state, "notes": notes}
+    return {"payouts": {"Alice": alice, "Bob": bob}, "held_back_change": reserve_in, "payout_fees_covered": Decimal("0.00"),
+            "state": new_state, "notes": notes}
 
 
 def calculate_refund(sale_id, refund_amount, fee_returned, state):

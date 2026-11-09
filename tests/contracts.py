@@ -13,7 +13,8 @@ def calculate_payout(sale_id, sale_amount, paypal_fee, state):
     notes = []
     if to_debt > 0:
         notes.append("Alice recoups her investment first: " + str(to_debt) + " of this sale.")
-    return {"payouts": payouts, "held_back_change": Decimal("0.00"), "state": {"owed": owed - to_debt}, "notes": notes}
+    return {"payouts": payouts, "held_back_change": Decimal("0.00"), "payout_fees_covered": Decimal("0.00"),
+            "state": {"owed": owed - to_debt}, "notes": notes}
 
 
 def calculate_refund(sale_id, refund_amount, fee_returned, state):
@@ -34,10 +35,10 @@ def refund(amount: str, sale_number: int) -> dict[str, Any]:
     return {"type": "refund", "amount": amount, "sale_number": sale_number}
 
 
-def expect(held: str = "0.00", **amounts: str) -> dict[str, Any]:
-    """Expected results for one event: what each party gets/transfers and the reserve movement."""
+def expect(held: str = "0.00", covered: str = "0.00", **amounts: str) -> dict[str, Any]:
+    """Expected results for one event: what each party gets/transfers, the reserve movement and payout fees covered."""
     return {"expected_amounts": [{"party": party, "amount": amount} for party, amount in amounts.items()],
-            "expected_held_back": held}
+            "expected_held_back": held, "expected_payout_fees_covered": covered}
 
 
 def with_expected(event: dict[str, Any], **kwargs: Any) -> dict[str, Any]:

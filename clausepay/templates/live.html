@@ -8,138 +8,130 @@
   .chip.paying, .chip.queued, .chip.created { color: #b54708; border-color: #b54708; }
   table.pay { border-collapse: collapse; font-size: .9rem; margin: .5rem 0; }
   table.pay td { padding: .15rem 1rem .15rem 0; } table.pay td:first-child { font-family: ui-monospace, monospace; font-size: .8rem; }
-  .refunds { border-top: 1px solid var(--edge); margin-top: .75rem; padding-top: .6rem; }
+  .refundbox { border-top: 1px solid var(--edge); margin-top: .75rem; padding-top: .6rem; }
   .refundrow { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-top: .4rem; }
   .refundrow input { width: 9rem; }
-  .done { color: var(--ok); } .warn { color: #b54708; }
-  .state pre { background: #8881; padding: .6rem; border-radius: .6rem; font-size: .8rem; overflow-x: auto; margin: .4rem 0 0; }
+  .done { color: var(--ok); } .warn { color: #b54708; } .ok-text { color: var(--ok); } .bad { color: var(--bad); }
+  .state pre, details pre { background: #8881; padding: .6rem; border-radius: .6rem; font-size: .8rem; overflow-x: auto; margin: .4rem 0 0; }
   .demo-note { border: 1px solid #b54708; border-radius: .6rem; padding: .5rem .8rem; margin: 0 0 1rem; font-size: .9rem; }
   details ul { margin: .3rem 0; padding-left: 1.2rem; font-size: .9rem; }
   .mono { font-family: ui-monospace, monospace; font-size: .8rem; word-break: break-all; }
+  .log { max-height: 20rem; overflow-y: auto; font-size: .85rem; border: 1px solid var(--edge); border-radius: .6rem; }
+  .log div { display: flex; gap: .6rem; padding: .25rem .6rem; border-bottom: 1px solid var(--edge); }
+  .log div:last-child { border-bottom: 0; } .log time { opacity: .6; white-space: nowrap; font-family: ui-monospace, monospace; font-size: .78rem; }
+  .log .kind { min-width: 5.5rem; font-weight: 600; }
+  .log .k-error, .log .k-attention, .log .k-failed, .log .k-warning { color: var(--bad); } .log .k-committed, .log .k-report { color: var(--ok); }
+  .report { border: 1px solid var(--edge); border-radius: .6rem; padding: .6rem .9rem; margin-top: .6rem; background: #8881; }
+  .report h4 { margin: 0 0 .3rem; } .report p { margin: .3rem 0; font-size: .92rem; }
+  table.fig { border-collapse: collapse; font-size: .85rem; margin: .4rem 0; } table.fig td { padding: .1rem 1.2rem .1rem 0; }
+  table.fig td:first-child { opacity: .75; }
 </style>
 {% endblock %}
 
 {% block content %}
-<p class="demo-note"><strong>Sandbox demo.</strong> Each sale here really runs your frozen contract: the buyer pays, the contract decides who gets what, the partners are paid through PayPal Payouts, and the contract's memory only moves forward once PayPal confirms the payout. When a refund needs partners to transfer money in, you confirm the transfer yourself (ClausePay does not charge their wallets yet).</p>
+<p class="demo-note"><strong>Debugging window.</strong> The main app is the Contract and Transactions tabs. This page shows everything happening behind them: PayPal's notifications, the contract's decisions, payouts, the journal and the reports. You can also start a test sale here. Partner transfers for refunds are simulated (you confirm them), and emails are simulated (the report is shown, marked "sent").</p>
 
 <div id="empty" class="card" hidden>
   <h2>No frozen contract yet</h2>
-  <p class="role">Write a contract in the <a href="/">Contract tab</a>, approve three scenarios, add the emails and freeze it. Then come back here to run real sales through it.</p>
+  <p class="role">Write a contract in the <a href="/contract">Contract tab</a>, approve three scenarios, add the emails and freeze it. Then sales that PayPal reports are run through it automatically.</p>
 </div>
 
 <div id="main" hidden>
   <div class="grid">
     <section class="card" id="contract-card"></section>
     <section class="card">
-      <h2>Buyer</h2>
-      <p class="role">Pays for each sale. Log in with this account in the PayPal window.</p>
-      {% if buyer.email %}<div class="email">{{ buyer.email }}</div>{% else %}<div class="email missing">not configured</div>{% endif %}
-      <form id="sale-form" style="margin-top:.75rem">
+      <h2>Test sale</h2>
+      <p class="role">Pays as the buyer (<span class="mono">{{ buyer.email or "not configured" }}</span>) in a PayPal window. PayPal then reports the sale like any other.</p>
+      <form id="sale-form">
         <label>Amount A$ <input id="amount" value="100.00" inputmode="decimal" autocomplete="off"></label>
-        <p><button type="submit" id="sale-button">New sale (opens PayPal)</button></p>
+        <p><button type="submit" id="sale-button">New test sale (opens PayPal)</button></p>
       </form>
       <p id="sale-message" class="role"></p>
+      <p id="webhook-status" class="role"></p>
     </section>
   </div>
   <section class="card state" id="state-card" style="margin-top:1rem"></section>
+
   <h2>Sales</h2>
   <div id="sales"></div>
+
+  <h2>Activity log</h2>
+  <div class="log" id="log"></div>
+
+  <h2>Contract journal</h2>
+  <p class="role">One entry per sale or refund, exactly as the contract's runner recorded it.</p>
+  <div id="journal"></div>
 </div>
 
+<script src="/static/common.js"></script>
 <script>
+  const { el, aud, api, when, refundControls } = window.CP;
   const $ = (id) => document.getElementById(id);
   let data = null, lastJson = "", timer = null, popup = null;
-  const refundUI = {};  // order id -> { amount, request_id, message, needs }
-
-  function el(tag, attrs, ...children) {
-    const node = document.createElement(tag);
-    for (const [key, value] of Object.entries(attrs || {})) {
-      if (key === "class") node.className = value; else if (key === "text") node.textContent = value; else node.setAttribute(key, value);
-    }
-    for (const child of children.flat()) if (child != null) node.append(child);
-    return node;
-  }
-  const aud = (value) => "A$" + Number(value).toLocaleString("en-AU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const refundUI = {};
   const LABELS = { created: "Waiting for the buyer to pay", queued: "Queued", paying: "Paying out…", paid_out: "Paid out", attention: "Needs attention", failed: "Failed, nothing paid out" };
-  async function api(path, body) {
-    try {
-      const response = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      return { ok: response.ok, data: await response.json().catch(() => ({ error: "Unexpected reply from the server." })) };
-    } catch (error) { return { ok: false, data: { error: "Lost the connection to the server." } }; }
-  }
-  const newId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
 
   function contractCard(c) {
     const people = c.parties.map((p) => el("li", {}, el("strong", { text: p.name }), " " + (c.emails[p.name] || "(no email)")));
     return [el("h2", { text: "Frozen contract" }),
-      el("p", { class: "role", text: "Contract " + c.id + " · version " + c.version + " · frozen " + (c.frozen_at || "").replace("T", " ").replace("+00:00", " UTC") }),
-      el("p", { class: "mono", text: "Fingerprint " + c.sha256 }),
-      el("ul", {}, people),
+      el("p", { class: "role", text: "Contract " + c.id + " · version " + c.version + " · frozen " + when(c.frozen_at) }),
+      el("p", { class: "mono", text: "Fingerprint " + c.sha256 }), el("ul", {}, people),
       c.problem ? el("p", { class: "warn", text: "Stopped: " + c.problem }) : null,
       c.pending.length ? el("p", { class: "warn", text: "Waiting for PayPal to confirm: " + c.pending.join(", ") }) : null].filter(Boolean);
   }
   function stateCard(c) {
     return [el("h2", { text: "The contract's memory right now" }),
-      el("p", { class: "role", text: "Held back in the reserve: " + aud(c.reserve) + ". This is what the contract remembers between sales (it is saved after every confirmed transaction and checked against the code's fingerprint before every run)." }),
+      el("p", { class: "role", text: "Held back in the reserve: " + aud(c.reserve) + ". What the contract remembers between sales: saved after every confirmed transaction and checked against the code's fingerprint before every run." }),
       el("pre", { text: JSON.stringify(c.state, null, 2) })];
   }
 
-  function refundArea(sale) {
-    const ui = refundUI[sale.order_id] = refundUI[sale.order_id] || { amount: "", request_id: null, message: "", needs: null };
-    const box = el("div", { class: "refunds" });
-    box.append(el("strong", { text: "Refunds" }), el("div", { class: "role", text: "Refunded " + aud(sale.refunded) + " of " + aud(sale.gross) + ". " + aud(sale.refundable) + " left to refund. Each refund only takes from what is left." }));
-    for (const refund of sale.refunds) {
-      box.append(el("details", {}, el("summary", { class: refund.status === "done" ? "done" : "warn", text: aud(refund.amount) + " refunded " + (refund.status === "done" ? "✓" : "(needs attention)") }),
-        refund.note ? el("p", { class: "warn", text: refund.note }) : null, el("ul", {}, refund.lines.map((line) => el("li", { text: line }))),
-        refund.notes.map((note) => el("p", { class: "note", text: "How the contract divided it: " + note }))));
-    }
-    if (Number(sale.refundable) <= 0) return box;
-    const amount = el("input", { value: ui.amount, placeholder: aud(sale.refundable).replace("A$", "") + " (all that is left)", inputmode: "decimal", autocomplete: "off", "aria-label": "Refund amount in A$" });
-    amount.addEventListener("input", () => { ui.amount = amount.value; ui.request_id = null; ui.needs = null; });
-    const go = async (confirmed) => {
-      ui.request_id = ui.request_id || newId();
-      ui.message = "Refunding…"; renderSales();
-      const { ok, data: reply } = await api("/api/live/sales/" + sale.order_id + "/refund", { amount: ui.amount.trim(), request_id: ui.request_id, partners_confirmed: confirmed });
-      if (reply.needs_partner_transfer) { ui.needs = reply.needs_partner_transfer; ui.message = ""; }
-      else if (ok) { ui.amount = ""; ui.request_id = null; ui.needs = null; ui.message = "✓ Refunded."; }
-      else { ui.message = reply.error || "Could not refund."; ui.needs = null; ui.request_id = null; }
-      await load(true);
-    };
-    const button = el("button", { type: "button", text: "Refund" });
-    button.addEventListener("click", () => go(false));
-    box.append(el("div", { class: "refundrow" }, el("span", { text: "A$" }), amount, button));
-    if (ui.needs) {
-      const confirm = el("button", { type: "button", class: "ok", text: "Demo: partners have transferred in. Continue the refund." });
-      confirm.addEventListener("click", () => go(true));
-      box.append(el("div", { class: "demo-note" }, el("strong", { text: "Partners must put money in first. " }),
-        el("span", { text: "The contract says this refund (" + aud(ui.needs.amount) + ") is funded " + aud(ui.needs.from_reserve) + " from the reserve and the rest by the partners: " +
-          Object.entries(ui.needs.transfers).map(([name, value]) => name + " " + aud(value)).join(", ") + ". In production ClausePay would collect this from their saved PayPal wallets; here you confirm it." }),
-        el("details", {}, el("summary", { text: "See the working" }), el("ul", {}, ui.needs.lines.map((line) => el("li", { text: line })))), confirm));
-    }
-    if (ui.message) box.append(el("p", { class: "role " + (ui.message.startsWith("✓") ? "ok-text" : ui.message.endsWith("…") ? "" : "bad"), text: ui.message }));
-    return box;
+  function reportNode(report, heading) {
+    return el("div", { class: "report" }, el("h4", { text: heading + ": " + report.subject }),
+      ...report.narrative.map((paragraph) => el("p", { text: paragraph })),
+      el("table", { class: "fig" }, report.figures.map(([label, value]) => el("tr", {}, el("td", { text: label }), el("td", { text: value })))),
+      el("p", { class: "role", text: "✓ " + report.email_status + " to " + report.recipients.join(", ") + " · written by " + (report.source === "claude" ? "Claude" : "fixed wording (Claude unavailable)") }));
   }
 
   function saleCard(sale) {
+    const ui = refundUI[sale.order_id] = refundUI[sale.order_id] || { open: false, amount: "", request_id: null, message: "", needs: null };
     const kids = [el("header", {}, el("h3", { text: aud(sale.amount) + " sale" }), el("span", { class: "chip " + sale.status, text: LABELS[sale.status] || sale.status }),
-      sale.payer_name ? el("span", { class: "role", text: "bought by " + sale.payer_name }) : null)];
+      el("span", { class: "role", text: [sale.payer_name ? "bought by " + sale.payer_name : "", when(sale.created_at), sale.capture_id ? "payment " + sale.capture_id : ""].filter(Boolean).join(" · ") }))];
     if (sale.note) kids.push(el("p", { class: sale.status === "attention" || sale.status === "failed" ? "warn" : "role", text: sale.note }));
+    if (sale.warning) kids.push(el("p", { class: "warn", text: "⚠ " + sale.warning }));
     if (sale.gross) kids.push(el("p", { class: "role", text: "Buyer paid " + aud(sale.gross) + " · PayPal fee " + aud(sale.paypal_fee) + " · business received " + aud(sale.net) }));
     if (Object.keys(sale.payouts).length) {
       kids.push(el("table", { class: "pay" }, Object.entries(sale.payouts).map(([email, value]) => el("tr", {}, el("td", { text: email }), el("td", { text: aud(value) })))),
-        el("p", { class: "role", text: "PayPal payout: " + (sale.payout_status || "sent") + (sale.payout_fee ? " · payout fee " + aud(sale.payout_fee) + " (paid by the business; the contract does not cover it yet)" : "") }));
+        el("p", { class: "role", text: "PayPal payout: " + (sale.payout_status || "sent") + " · payout fee expected " + aud(sale.payout_fee_expected || 0) + (sale.payout_fee ? ", PayPal charged " + aud(sale.payout_fee) : "") + " · " + aud(sale.payout_fee_covered || 0) + " of it taken from the sale's money, the rest absorbed by the business" }));
     }
     if (sale.lines.length) kids.push(el("details", {}, el("summary", { text: "How the contract divided it" }), el("ul", {}, sale.lines.map((line) => el("li", { text: line }))),
-      sale.notes.map((note) => el("p", { class: "note", text: "How the contract divided it: " + note }))));
-    if (sale.status === "paid_out") kids.push(refundArea(sale));
+      sale.notes.map((note) => el("p", { class: "role", text: "Contract note: " + note }))));
+    if (sale.report) kids.push(reportNode(sale.report, "Sale report"));
+    else if (sale.status === "paid_out") kids.push(el("p", { class: "role", text: "Writing the partners' report…" }));
+    if (sale.status === "paid_out") {
+      kids.push(refundControls(sale, ui, () => load(true), renderSales));
+      for (const refund of sale.refunds) {
+        kids.push(el("details", {}, el("summary", { class: refund.status === "done" ? "done" : "warn", text: "Refund " + aud(refund.amount) + (refund.status === "done" ? " ✓" : " (needs attention)") }),
+          refund.note ? el("p", { class: "warn", text: refund.note }) : null, el("ul", {}, refund.lines.map((line) => el("li", { text: line }))),
+          refund.report ? reportNode(refund.report, "Refund report") : null));
+      }
+    }
     return el("div", { class: "sale" }, kids);
   }
 
   function renderSales() {
     const active = document.activeElement;
-    const keep = active && active.tagName === "INPUT" && $("sales").contains(active) ? { value: active.value, index: [...$("sales").querySelectorAll("input")].indexOf(active) } : null;
-    $("sales").replaceChildren(...(data.sales.length ? data.sales.map(saleCard) : [el("p", { class: "role", text: "No sales yet. Click “New sale” above." })]));
-    if (keep && keep.index >= 0) { const input = $("sales").querySelectorAll("input")[keep.index]; if (input) input.focus(); }
+    const keep = active && active.tagName === "INPUT" && $("sales").contains(active) ? [...$("sales").querySelectorAll("input")].indexOf(active) : -1;
+    $("sales").replaceChildren(...(data.sales.length ? data.sales.map(saleCard) : [el("p", { class: "role", text: "No sales yet." })]));
+    if (keep >= 0) { const input = $("sales").querySelectorAll("input")[keep]; if (input) input.focus(); }
+  }
+
+  function renderLog() {
+    $("log").replaceChildren(...(data.log.length ? data.log.map((line) => el("div", {}, el("time", { text: when(line.at) }), el("span", { class: "kind k-" + line.kind, text: line.kind }), el("span", { text: line.message })))
+      : [el("div", {}, el("span", { class: "role", text: "Nothing has happened yet." }))]));
+  }
+  function renderJournal() {
+    $("journal").replaceChildren(...(data.journal.length ? data.journal.map((entry) => el("details", {}, el("summary", { text: entry.entry_id + " · " + entry.status + " · " + aud(entry.amount) + (entry.attempt > 1 ? " · attempt " + entry.attempt : "") }),
+      el("pre", { text: JSON.stringify(entry, null, 2) }))) : [el("p", { class: "role", text: "The journal is empty." })]));
   }
 
   async function load(force) {
@@ -152,11 +144,12 @@
     if (!data.contract) return;
     $("contract-card").replaceChildren(...contractCard(data.contract));
     $("state-card").replaceChildren(...stateCard(data.contract));
-    renderSales();
+    $("webhook-status").textContent = data.webhook_configured ? "✓ PayPal notifications are verified and run through the contract." : "PayPal notifications are not set up here (no paypal_webhook_id). Sales started on this page still run through the contract when the buyer returns.";
+    renderSales(); renderLog(); renderJournal();
   }
   function schedule() {
     clearTimeout(timer);
-    const busy = data && data.sales.some((s) => ["created", "queued", "paying"].includes(s.status));
+    const busy = data && data.sales.some((s) => ["created", "queued", "paying"].includes(s.status) || (s.status === "paid_out" && !s.report));
     timer = setTimeout(async () => { await load(false); schedule(); }, busy ? 2000 : 6000);
   }
 
@@ -168,8 +161,7 @@
     if (!ok) { $("sale-message").textContent = reply.error || "Could not start the sale."; return; }
     popup = window.open(reply.approve_url, "paypal-checkout", "width=480,height=760");
     $("sale-message").textContent = popup ? "PayPal opened in a new window. If it shows “Page unavailable” after you log in, reopen the checkout link: " : "Your browser blocked the window: ";
-    const link = el("a", { href: reply.approve_url, target: "_blank", rel: "noopener", text: "open checkout" });
-    $("sale-message").append(link);
+    $("sale-message").append(el("a", { href: reply.approve_url, target: "_blank", rel: "noopener", text: "open checkout" }));
     await load(true); schedule();
   });
 

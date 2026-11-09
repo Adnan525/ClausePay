@@ -37,11 +37,12 @@
     <h1>ClausePay</h1>
     <p class="lead">Routes sales between partners and handles refunds, according to a plain-English contract.</p>
     <nav>
-      <a href="/" class="{{ 'active' if active == 'contract' }}">Contract</a>
+      <a href="/contract" class="{{ 'active' if active == 'contract' }}">Contract</a>
+      <a href="/transactions" class="{{ 'active' if active == 'transactions' }}">Transactions</a>
       <span class="sep">Demo helpers</span>
       <a href="/accounts" class="helper {{ 'active' if active == 'accounts' }}">Accounts</a>
       <a href="/order" class="helper {{ 'active' if active == 'order' }}">Order</a>
-      <a href="/live" class="helper {{ 'active' if active == 'live' }}">Live sales</a>
+      <a href="/live" class="helper {{ 'active' if active == 'live' }}">Live sales (debug)</a>
     </nav>
     {% block content %}{% endblock %}
   </main>

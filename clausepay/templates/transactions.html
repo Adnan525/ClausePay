@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+  .tx { border: 1px solid var(--edge); border-radius: .75rem; padding: .9rem 1rem; margin-bottom: .75rem; }
+  .tx header { display: flex; gap: .75rem; align-items: baseline; flex-wrap: wrap; }
+  .tx h3 { margin: 0; font-size: 1.15rem; }
+  .tx .spacer { flex: 1; }
+  .chip.paid_out { color: var(--ok); border-color: var(--ok); } .chip.attention, .chip.failed { color: var(--bad); border-color: var(--bad); }
+  .chip.paying, .chip.queued { color: #b54708; border-color: #b54708; }
+  .refundbox { margin-top: .6rem; }
+  .refundrow { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  .refundrow input { width: 9rem; }
+  .demo-note { border: 1px solid #b54708; border-radius: .6rem; padding: .5rem .8rem; margin: .6rem 0; font-size: .9rem; }
+  .ok-text { color: var(--ok); } .bad { color: var(--bad); }
+  .summary { display: flex; gap: 2rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .summary div { min-width: 8rem; } .summary strong { display: block; font-size: 1.3rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="empty" class="card" hidden>
+  <h2>No frozen contract yet</h2>
+  <p class="role">Write a contract in the <a href="/contract">Contract tab</a>, approve three scenarios, add the emails and freeze it. Every sale that comes in afterwards is recorded here and paid out automatically.</p>
+</div>
+
+<div id="main" hidden>
+  <div class="summary" id="summary"></div>
+  <p class="role">Every sale that PayPal reports is recorded here, and the partners are paid automatically in the background. To undo a sale, use Refund. Everything that happens behind the scenes can be followed in the <a href="/live">Live sales</a> debugging window.</p>
+  <div id="list"></div>
+</div>
+
+<script src="/static/common.js"></script>
+<script>
+  const { el, aud, api, when, refundControls } = window.CP;
+  let data = null, lastJson = "", timer = null;
+  const refundUI = {};
+  const LABELS = { queued: "Queued", paying: "Paying out…", paid_out: "Paid out", attention: "Needs attention", failed: "Failed, nobody was paid" };
+
+  function row(sale) {
+    const ui = refundUI[sale.order_id] = refundUI[sale.order_id] || { open: false, amount: "", request_id: null, message: "", needs: null };
+    const kids = [el("header", {}, el("h3", { text: aud(sale.amount) }), el("span", { class: "chip " + sale.status, text: LABELS[sale.status] || sale.status }),
+      Number(sale.refunded) > 0 ? el("span", { class: "chip", text: Number(sale.refundable) > 0 ? "Partly refunded" : "Refunded" }) : null,
+      el("span", { class: "spacer" }), el("span", { class: "role", text: [sale.payer_name ? "from " + sale.payer_name : "", when(sale.created_at)].filter(Boolean).join(" · ") }))];
+    if (sale.note) kids.push(el("p", { class: sale.status === "attention" || sale.status === "failed" ? "bad" : "role", text: sale.note + (sale.status === "attention" ? " See the Live sales window." : "") }));
+    if (sale.status === "paid_out") kids.push(refundControls(sale, ui, () => load(true), render));
+    return el("div", { class: "tx" }, kids);
+  }
+
+  function render() {
+    const sales = data.sales;
+    const received = sales.reduce((sum, s) => sum + Number(s.gross || 0), 0);
+    const refunded = sales.reduce((sum, s) => sum + Number(s.refunded || 0), 0);
+    $summary.replaceChildren(el("div", {}, el("strong", { text: String(sales.length) }), "sales"), el("div", {}, el("strong", { text: aud(received) }), "received"), el("div", {}, el("strong", { text: aud(refunded) }), "refunded"));
+    $list.replaceChildren(...(sales.length ? sales.map(row) : [el("p", { class: "role", text: "No sales yet. They appear here as soon as PayPal reports one." })]));
+  }
+
+  async function load(force) {
+    const { data: next } = await api("/api/transactions");
+    if (!next || next.error) return;
+    const json = JSON.stringify(next);
+    if (json === lastJson && !force) return;
+    lastJson = json; data = next;
+    document.getElementById("empty").hidden = !!data.contract; document.getElementById("main").hidden = !data.contract;
+    if (data.contract) render();
+  }
+
+  const $summary = document.getElementById("summary"), $list = document.getElementById("list");
+  function schedule() {
+    clearTimeout(timer);
+    const busy = data && data.sales.some((s) => ["queued", "paying"].includes(s.status));
+    timer = setTimeout(async () => { await load(false); schedule(); }, busy ? 2000 : 5000);
+  }
+  load(true).then(schedule);
+</script>
+{% endblock %}

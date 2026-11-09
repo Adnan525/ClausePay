@@ -11,6 +11,8 @@ import sys
 from decimal import Decimal
 from typing import Any
 
+from clausepay.fees import payout_fee_settings
+
 MAX_CODE_CHARS = 20_000
 TIMEOUT_SECONDS = 5
 
@@ -137,8 +139,17 @@ def decode(obj):
 
 payload = json.loads(sys.stdin.read(), object_hook=decode)
 safe = {name: getattr(builtins, name) for name in payload["allowed"]}
+RATE = Decimal(payload["payout_fee_rate"])
+CAP = Decimal(payload["payout_fee_cap"]) if payload.get("payout_fee_cap") else None
+
+
+def payout_fee(amount):
+    fee = (Decimal(amount) * RATE).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return min(fee, CAP) if CAP is not None else fee
+
+
 scope = {"__builtins__": safe, "Decimal": Decimal, "ROUND_HALF_UP": ROUND_HALF_UP,
-         "ROUND_DOWN": ROUND_DOWN, "CENT": Decimal("0.01")}
+         "ROUND_DOWN": ROUND_DOWN, "CENT": Decimal("0.01"), "payout_fee": payout_fee}
 try:
     exec(compile(payload["code"], "<contract>", "exec"), scope)
     result = scope[payload["function"]](**payload["kwargs"])
@@ -153,8 +164,10 @@ def run_function(code: str, function: str, kwargs: dict[str, Any]) -> Any:
     problems = check_code(code)
     if problems:
         raise SandboxError("; ".join(problems))
+    rate, cap = payout_fee_settings()
     payload = json.dumps(
-        {"code": code, "function": function, "kwargs": kwargs, "allowed": ALLOWED_BUILTINS}, default=_encode
+        {"code": code, "function": function, "kwargs": kwargs, "allowed": ALLOWED_BUILTINS,
+         "payout_fee_rate": str(rate), "payout_fee_cap": None if cap is None else str(cap)}, default=_encode
     )
     try:
         completed = subprocess.run(

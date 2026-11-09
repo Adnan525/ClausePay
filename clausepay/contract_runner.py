@@ -62,6 +62,10 @@ class Transaction:
     state_after: dict[str, Any]
     lines: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    payout_fees: Decimal = ZERO  # what PayPal is expected to charge the business for sending the payouts
+    payout_fees_covered: Decimal = ZERO  # the part of that taken from the sale's money
+    state_before: dict[str, Any] = field(default_factory=dict)
+    reserve_before: Decimal = ZERO
 
 
     def by_email(self, emails: dict[str, str]) -> dict[str, Decimal]:
@@ -167,16 +171,20 @@ class ContractRunner:
     def _as_transaction(entry: dict[str, Any], duplicate: bool = False) -> Transaction:
         return Transaction(entry["entry_id"], entry["kind"], entry["status"], duplicate, entry["amounts"],
                            entry["reserve_change"], entry["reserve_after"], entry["state_after"],
-                           entry["lines"], entry["notes"])
+                           entry["lines"], entry["notes"], entry.get("payout_fees", ZERO),
+                           entry.get("payout_fees_covered", ZERO), entry.get("state_before", {}),
+                           entry["reserve_after"] - entry["reserve_change"])
 
 
     def _record(self, journal: dict[str, Any], entry_id: str, kind: str, sale_id: str, amount: Decimal,
-                fee: Decimal, outcome: StepOutcome) -> Transaction:
+                fee: Decimal, outcome: StepOutcome, state_before: dict[str, Any]) -> Transaction:
         attempt = 1 + sum(1 for entry in journal["entries"] if entry["entry_id"] == entry_id)
         entry = {"entry_id": entry_id, "kind": kind, "sale_id": sale_id, "attempt": attempt, "amount": amount,
                  "fee": fee, "amounts": outcome.amounts, "reserve_change": outcome.reserve_change,
                  "reserve_after": outcome.reserve_after, "state_after": outcome.state, "lines": outcome.lines,
-                 "notes": outcome.notes, "status": "pending", "recorded_at": _now()}
+                 "notes": outcome.notes, "payout_fees": outcome.payout_fees,
+                 "payout_fees_covered": outcome.payout_fees_covered, "state_before": state_before,
+                 "status": "pending", "recorded_at": _now()}
         journal["entries"].append(entry)
         self._save(journal)
         return self._as_transaction(entry)
@@ -204,7 +212,7 @@ class ContractRunner:
                 outcome = apply_sale(code, self.parties, sale_id, amount, fee, state, reserve)
             except ContractProblem as problem:
                 raise ContractFailedError(" ".join(problem.problems)) from None
-            return self._record(journal, entry_id, "sale", sale_id, amount, fee, outcome)
+            return self._record(journal, entry_id, "sale", sale_id, amount, fee, outcome, state)
 
 
     def process_refund(self, sale_id: str, refund_id: str, refund_amount: Decimal, fee_returned: Decimal) -> Transaction:
@@ -231,7 +239,7 @@ class ContractRunner:
                 outcome = apply_refund(code, self.parties, sale_id, amount, returned, state, reserve)
             except ContractProblem as problem:
                 raise ContractFailedError(" ".join(problem.problems)) from None
-            return self._record(journal, entry_id, "refund", sale_id, amount, returned, outcome)
+            return self._record(journal, entry_id, "refund", sale_id, amount, returned, outcome, state)
 
 
     def refundable(self, sale_id: str) -> Decimal:

@@ -220,7 +220,7 @@ def test_bad_emails_are_refused_with_a_reason(emails: dict[str, str], fragment: 
 
 SOLO_CODE = '''
 def calculate_payout(sale_id, sale_amount, paypal_fee, state):
-    return {"payouts": {"Alice": sale_amount - paypal_fee}, "held_back_change": Decimal("0.00"), "state": state, "notes": []}
+    return {"payouts": {"Alice": sale_amount - paypal_fee}, "held_back_change": Decimal("0.00"), "payout_fees_covered": Decimal("0.00"), "state": state, "notes": []}
 
 
 def calculate_refund(sale_id, refund_amount, fee_returned, state):

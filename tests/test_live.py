@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from clausepay.contract_runner import ContractRunner, RunnerError
-from clausepay.fees import percentage_fee, sale_fee
+from clausepay.fees import payout_fee, percentage_fee, sale_fee
 from clausepay.live import LiveService, LiveStore, payout_outcome
 from clausepay.paypal_client import PayPalError
 from tests.contracts import REFERENCE_CODE
@@ -29,6 +29,7 @@ class FakePayPal:
     def __init__(self) -> None:
         self.orders: dict[str, Decimal] = {}
         self.payouts: list[dict[str, Decimal]] = []
+        self.payout_fee_off_by = Decimal("0.00")  # make PayPal's payout fee differ from the contract's expectation
         self.refunds: dict[str, dict[str, Any]] = {}  # request id -> refund
         self.payout_status = "PENDING"  # what get_payout reports
         self.item_status = "SUCCESS"
@@ -36,6 +37,10 @@ class FakePayPal:
         self.fee_off_by = Decimal("0.00")  # make the reported sale fee differ from the expected one
         self.refund_fee_off_by = Decimal("0.00")
         self.refund_status = "COMPLETED"
+        self.capture_status = "COMPLETED"
+        self.custom_ids: dict[str, str] = {}
+        self.capture_currency = "AUD"
+        self.webhook_ok = True
 
 
     def create_order(self, amount: Decimal, **kwargs: Any) -> dict[str, Any]:
@@ -63,6 +68,20 @@ class FakePayPal:
         return self.get_order(order_id)
 
 
+    def get_capture(self, capture_id: str) -> dict[str, Any]:
+        order_id = capture_id.removeprefix("CAP-")
+        capture = self.get_order(order_id)["purchase_units"][0]["payments"]["captures"][0]
+        capture = {**capture, "status": self.capture_status, "supplementary_data": {"related_ids": {"order_id": order_id}}}
+        if order_id in self.custom_ids:
+            capture["custom_id"] = self.custom_ids[order_id]
+        capture["amount"] = {**capture["amount"], "currency_code": self.capture_currency}
+        return capture
+
+
+    def verify_webhook(self, webhook_id: str, headers: dict[str, str], event: dict[str, Any]) -> bool:
+        return self.webhook_ok
+
+
     def send_payouts(self, payments: dict[str, Decimal], note: str = "") -> dict[str, Any]:
         if self.send_error:
             raise self.send_error
@@ -71,8 +90,11 @@ class FakePayPal:
 
 
     def get_payout(self, batch_id: str) -> dict[str, Any]:
-        return {"batch_header": {"batch_status": self.payout_status},
-                "items": [{"transaction_status": self.item_status, "payout_item_fee": {"currency": "AUD", "value": "0.02"}}]}
+        payments = self.payouts[int(batch_id.removeprefix("BATCH")) - 1]
+        items = [{"transaction_status": self.item_status,
+                  "payout_item_fee": {"currency": "AUD", "value": str(payout_fee(amount) + self.payout_fee_off_by)}}
+                 for amount in payments.values()]
+        return {"batch_header": {"batch_status": self.payout_status}, "items": items}
 
 
     def refund_capture(self, capture_id: str, amount: Decimal | None = None, note_to_payer: str | None = None,
@@ -149,7 +171,7 @@ def test_the_contracts_memory_only_moves_once_paypal_confirms_the_payout(service
     assert service.store.all()[0].status == "paying"
     pay_out(service, paypal)
     sale = service.store.all()[0]
-    assert sale.status == "paid_out" and sale.payout_fee == "0.02"
+    assert sale.status == "paid_out" and sale.payout_fee == "1.95" and sale.warning == ""
     assert [e["status"] for e in runner.entries()] == ["committed"] and runner.state() == {"owed": d("102.70")}
 
 
@@ -356,3 +378,117 @@ def test_the_most_recently_frozen_contract_is_the_one_used(tmp_path: Path, paypa
     newer.touch()
     assert service.contract_path() == newer
     assert isinstance(service.runner(), ContractRunner)
+
+
+def test_a_payout_fee_that_differs_from_the_expected_one_is_recorded_as_a_warning(service: LiveService, paypal: FakePayPal) -> None:
+    order_id = sell(service)
+    assert service.store.get(order_id).payout_fee_expected == "1.95"  # type: ignore[union-attr]
+    paypal.payout_fee_off_by = d("0.03")
+    pay_out(service, paypal)
+    sale = service.store.get(order_id)
+    assert sale is not None and sale.status == "paid_out"  # the money moved, so the contract's memory moved too
+    assert "charged 1.98 in payout fees but the contract expected 1.95" in sale.warning
+    assert service.require_runner().state() == {"owed": d("102.70")}
+
+
+# ---------- every sale PayPal reports goes through the contract ----------
+
+def test_a_sale_made_outside_clausepay_is_recorded_and_paid_out(service: LiveService, paypal: FakePayPal) -> None:
+    paypal.orders["EXTERNAL1"] = d("100.00")  # a payment ClausePay never started
+    sale = service.ingest_capture("CAP-EXTERNAL1", "webhook", "EXTERNAL1")
+    assert sale is not None and sale.order_id == "EXTERNAL1" and sale.status == "paying"
+    assert paypal.payouts == [{"alice@example.com": d("97.30")}]
+    assert any("Sale notification CAP-EXTERNAL1 received (webhook)" in line["message"] for line in service.store.entries())
+
+
+def test_the_same_notification_twice_pays_once(service: LiveService, paypal: FakePayPal) -> None:
+    paypal.orders["EXTERNAL1"] = d("100.00")
+    service.ingest_capture("CAP-EXTERNAL1", "webhook", "EXTERNAL1")
+    again = service.ingest_capture("CAP-EXTERNAL1", "webhook", "EXTERNAL1")
+    assert again is not None and len(paypal.payouts) == 1 and len(service.require_runner().entries()) == 1
+    assert any(line["kind"] == "duplicate" for line in service.store.entries())
+
+
+def test_the_return_and_the_webhook_for_the_same_sale_pay_once(service: LiveService, paypal: FakePayPal) -> None:
+    order_id = sell(service)  # the buyer came back from PayPal
+    service.ingest_capture(f"CAP-{order_id}", "webhook", order_id)  # and PayPal's notification arrives too
+    assert len(paypal.payouts) == 1 and len(service.store.all()) == 1
+
+
+def test_a_notification_that_arrives_first_is_not_processed_twice_when_the_buyer_returns(service: LiveService, paypal: FakePayPal) -> None:
+    sale = service.create_sale(d("100.00"), "r", "c")
+    service.ingest_capture(f"CAP-{sale.order_id}", "webhook", sale.order_id)
+    service.handle_return(sale.order_id)
+    assert len(paypal.payouts) == 1
+
+
+def test_notifications_without_a_frozen_contract_are_noted_and_skipped(tmp_path: Path, paypal: FakePayPal) -> None:
+    empty = LiveService(lambda: paypal, LiveStore(), tmp_path / "frozen")  # type: ignore[arg-type, return-value]
+    paypal.orders["O1"] = d("100.00")
+    assert empty.ingest_capture("CAP-O1", "webhook", "O1") is None
+    assert any(line["kind"] == "skipped" and "no frozen contract" in line["message"] for line in empty.store.entries())
+
+
+def test_payments_that_are_not_completed_or_not_in_aud_are_skipped(service: LiveService, paypal: FakePayPal) -> None:
+    paypal.orders["O1"] = d("100.00")
+    paypal.capture_status = "PENDING"
+    assert service.ingest_capture("CAP-O1", "webhook", "O1") is None
+    paypal.capture_status, paypal.capture_currency = "COMPLETED", "USD"
+    assert service.ingest_capture("CAP-O1", "webhook", "O1") is None
+    assert paypal.payouts == [] and service.store.all() == []
+
+
+def test_a_notification_is_checked_against_paypals_own_record(service: LiveService, paypal: FakePayPal) -> None:
+    with pytest.raises(KeyError):  # PayPal has no such payment; nothing is trusted from the notification itself
+        service.ingest_capture("CAP-NOPE", "webhook", "NOPE")
+    assert paypal.payouts == []
+
+
+def test_the_activity_log_follows_a_sale_from_arrival_to_payout(service: LiveService, paypal: FakePayPal) -> None:
+    sell(service)
+    pay_out(service, paypal)
+    kinds = [line["kind"] for line in service.store.entries()]
+    assert kinds == ["sale", "payout", "committed"] and "sale:CAP-" in service.store.entries()[-1]["message"]
+    assert service.journal()[0]["status"] == "committed" and service.journal()[0]["payout_fees"] == "1.95"
+
+
+def test_the_log_is_capped_and_survives_a_restart(tmp_path: Path) -> None:
+    store = LiveStore(tmp_path / "live.json")
+    for number in range(LiveStore.MAX_LOG + 20):
+        store.log("note", f"line {number}")
+    assert len(store.entries()) == LiveStore.MAX_LOG and store.entries()[-1]["message"] == f"line {LiveStore.MAX_LOG + 19}"
+    assert LiveStore(tmp_path / "live.json").entries() == store.entries()
+
+
+def test_an_older_sales_file_without_a_log_still_loads(tmp_path: Path) -> None:
+    (tmp_path / "live.json").write_text(json.dumps([{"order_id": "O1", "amount": "5.00"}]))
+    assert LiveStore(tmp_path / "live.json").get("O1").amount == "5.00"
+
+
+def test_the_background_worker_runs_its_tasks_repeatedly_and_survives_a_failing_one() -> None:
+    import time
+    from clausepay.live import BackgroundWorker
+    store = LiveStore()
+    calls = {"good": 0}
+
+    def broken() -> None:
+        raise RuntimeError("boom")
+
+    def good() -> None:
+        calls["good"] += 1
+
+    worker = BackgroundWorker([broken, good], store, interval=0.01)
+    worker.start()
+    time.sleep(0.2)
+    worker.stop()
+    worker.join(timeout=2)
+    assert calls["good"] >= 3 and not worker.is_alive()
+    assert any(line["kind"] == "error" and "broken" in line["message"] for line in store.entries())
+
+
+def test_a_partner_top_up_arriving_as_a_payment_is_never_treated_as_a_sale(service: LiveService, paypal: FakePayPal) -> None:
+    paypal.orders["TOPUP1"] = d("48.80")
+    paypal.custom_ids["TOPUP1"] = "topup:refund-12:alice"
+    assert service.ingest_capture("CAP-TOPUP1", "webhook", "TOPUP1") is None
+    assert paypal.payouts == [] and service.store.all() == []
+    assert any(line["kind"] == "skipped" and "partner top-up" in line["message"] for line in service.store.entries())

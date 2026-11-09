@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from clausepay.contract_sandbox import SandboxError, check_code, run_function
-from clausepay.fees import CENT, DEFAULT_FEE_RATE, DEFAULT_FIXED_FEE, percentage_fee
+from clausepay.fees import CENT, DEFAULT_FEE_RATE, DEFAULT_FIXED_FEE, payout_fee, percentage_fee
 
 MIN_SALE = Decimal("1.00")
 MAX_SALE = Decimal("1000.00")
@@ -180,10 +180,18 @@ def _sale_step(code: str, parties: set[str], sale_id: str, amount: Decimal, stat
     new_state, notes = _clean_extras(result, where)
     payouts = _clean_split(result.get("payouts"), "payouts", parties, where)
     held = _clean_money(result.get("held_back_change"), "held_back_change", where)
-    if sum(payouts.values(), ZERO) + held != net:
+    if "payout_fees_covered" not in result:
+        raise ContractProblem([f"{where}: the result must include payout_fees_covered (use Decimal(\"0.00\") if none of the "
+                               "payout fees is taken from the sale's money)"])
+    covered = _clean_money(result["payout_fees_covered"], "payout_fees_covered", where)
+    fees_total = sum((payout_fee(value) for value in payouts.values() if value > 0), ZERO)
+    if not 0 <= covered <= fees_total:
+        raise ContractProblem([f"{where}: payout_fees_covered ({aud(covered)}) must be between 0 and the payout fees PayPal "
+                               f"will charge for these payouts ({aud(fees_total)})"])
+    if sum(payouts.values(), ZERO) + held + covered != net:
         raise ContractProblem([
-            f"{where}: payouts ({aud(sum(payouts.values(), ZERO))}) plus held_back_change ({aud(held)}) must equal "
-            f"the amount received after PayPal's fee ({aud(net)}) exactly"])
+            f"{where}: payouts ({aud(sum(payouts.values(), ZERO))}) plus held_back_change ({aud(held)}) plus "
+            f"payout_fees_covered ({aud(covered)}) must equal the amount received after PayPal's fee ({aud(net)}) exactly"])
     if reserve + held < 0:
         raise ContractProblem([f"{where}: held_back_change {aud(held)} would release more than the reserve holds ({aud(reserve)})"])
     lines = [
@@ -199,11 +207,17 @@ def _sale_step(code: str, parties: set[str], sale_id: str, amount: Decimal, stat
         lines.append(f"{aud(-held)} is released from the reserve (reserve is now {aud(reserve + held)}).")
     else:
         lines.append(f"Nothing is held back (reserve stays at {aud(reserve)}).")
-    lines.append(f"Check: payouts {aud(sum(payouts.values(), ZERO))} + held back {aud(held)} = {aud(net)} received.")
+    if fees_total > 0:
+        lines.append(f"PayPal will charge the business {aud(fees_total)} in payout fees for sending these payouts. "
+                     f"{aud(covered)} of that comes out of this sale's money; the business absorbs {aud(fees_total - covered)}.")
+    lines.append(f"Check: payouts {aud(sum(payouts.values(), ZERO))} + payout fees covered {aud(covered)} + held back "
+                 f"{aud(held)} = {aud(net)} received.")
     return {"kind": "sale", "heading": f"Sale: buyer pays {aud(amount)}", "lines": lines, "notes": notes,
-            "values": {"amounts": {name: str(value) for name, value in payouts.items()}, "other": str(held)},
-            "_state": new_state, "_reserve": reserve + held,
-            "_totals": {"paid": amount, "fee": fee, "refunded": ZERO, "payouts": payouts, "funding": {}}}
+            "values": {"amounts": {name: str(value) for name, value in payouts.items()}, "other": str(held),
+                       "covered": str(covered)},
+            "_state": new_state, "_reserve": reserve + held, "_fees": (fees_total, covered),
+            "_totals": {"paid": amount, "fee": fee, "refunded": ZERO, "payouts": payouts, "funding": {},
+                        "payout_fees": fees_total, "payout_fees_absorbed": fees_total - covered}}
 
 
 def _refund_step(code: str, parties: set[str], sale_id: str, amount: Decimal, state: dict[str, Any],
@@ -236,9 +250,11 @@ def _refund_step(code: str, parties: set[str], sale_id: str, amount: Decimal, st
         lines.append("No partner has to transfer money in.")
     lines.append(f"Check: transfers {aud(sum(funding.values(), ZERO))} + reserve {aud(from_reserve)} = {aud(cost)} cost.")
     return {"kind": "refund", "heading": f"Refund: buyer gets back {aud(amount)}", "lines": lines, "notes": notes,
-            "values": {"amounts": {name: str(value) for name, value in funding.items()}, "other": str(from_reserve)},
-            "_state": new_state, "_reserve": reserve - from_reserve,
-            "_totals": {"paid": ZERO, "fee": -returned, "refunded": amount, "payouts": {}, "funding": funding}}
+            "values": {"amounts": {name: str(value) for name, value in funding.items()}, "other": str(from_reserve),
+                       "covered": str(ZERO)},
+            "_state": new_state, "_reserve": reserve - from_reserve, "_fees": (ZERO, ZERO),
+            "_totals": {"paid": ZERO, "fee": -returned, "refunded": amount, "payouts": {}, "funding": funding,
+                        "payout_fees": ZERO, "payout_fees_absorbed": ZERO}}
 
 
 @dataclass(frozen=True)
@@ -250,6 +266,8 @@ class StepOutcome:
     state: dict[str, Any]
     lines: list[str]
     notes: list[str]
+    payout_fees: Decimal = ZERO  # what PayPal will charge the business for sending the payouts
+    payout_fees_covered: Decimal = ZERO  # the part of that taken from this sale's money (the rest is absorbed by the business)
 
 
 def apply_sale(code: str, party_names: list[str], sale_id: str, amount: Decimal, paypal_fee: Decimal,
@@ -258,7 +276,7 @@ def apply_sale(code: str, party_names: list[str], sale_id: str, amount: Decimal,
     step = _sale_step(code, set(party_names), sale_id, amount, state, reserve, DEFAULT_FEE_RATE, DEFAULT_FIXED_FEE,
                       f"Sale {sale_id}", reported_fee=paypal_fee)
     return StepOutcome(step["_totals"]["payouts"], step["_reserve"] - reserve, step["_reserve"], step["_state"],
-                       step["lines"], step["notes"])
+                       step["lines"], step["notes"], *step["_fees"])
 
 
 def apply_refund(code: str, party_names: list[str], sale_id: str, amount: Decimal, fee_returned: Decimal,
@@ -287,7 +305,8 @@ def simulate_scenario(code: str, party_names: list[str], scenario: dict[str, Any
     reserve = ZERO
     sales: list[dict[str, Any]] = []
     steps: list[dict[str, Any]] = []
-    totals = {"paid": ZERO, "fee": ZERO, "refunded": ZERO, "payouts": {}, "funding": {}}
+    totals = {"paid": ZERO, "fee": ZERO, "refunded": ZERO, "payouts": {}, "funding": {}, "payout_fees": ZERO,
+              "payout_fees_absorbed": ZERO}
     for number, event in enumerate(scenario["events"], start=1):
         where = f"{label} {index}, event {number}"
         if event["type"] == "sale":
@@ -305,8 +324,9 @@ def simulate_scenario(code: str, party_names: list[str], scenario: dict[str, Any
             step = _refund_step(code, parties, sale["id"], wanted, state, reserve, rate, where)
             step["heading"] = f"Event {number}: refund of sale {event['sale_number']}. Buyer gets back {aud(wanted)}"
         state, reserve = step.pop("_state"), step.pop("_reserve")
+        step.pop("_fees")
         piece = step.pop("_totals")
-        for key in ("paid", "fee", "refunded"):
+        for key in ("paid", "fee", "refunded", "payout_fees", "payout_fees_absorbed"):
             totals[key] += piece[key]
         _add(totals["payouts"], piece["payouts"])
         _add(totals["funding"], piece["funding"])
@@ -315,7 +335,8 @@ def simulate_scenario(code: str, party_names: list[str], scenario: dict[str, Any
     return {
         "title": scenario["title"], "steps": steps,
         "totals": {"buyers_paid": str(totals["paid"]), "paypal_fees_kept": str(totals["fee"]),
-                   "refunded": str(totals["refunded"]),
+                   "refunded": str(totals["refunded"]), "payout_fees": str(totals["payout_fees"]),
+                   "payout_fees_absorbed": str(totals["payout_fees_absorbed"]),
                    "paid_out": {name: str(value) for name, value in totals["payouts"].items()},
                    "transferred_in": {name: str(value) for name, value in totals["funding"].items()},
                    "reserve_at_end": str(reserve)},
@@ -349,7 +370,11 @@ def parse_tests(data: Any, party_names: list[str]) -> list[dict[str, Any]]:
             other = _amount(raw.get("expected_held_back")) if isinstance(raw, dict) else None
             if other is None:
                 problems.append(f"{where}: expected_held_back must be an amount in whole cents (use 0.00 if none)")
-            expected.append({"amounts": amounts, "other": other if other is not None else ZERO})
+            covered = _amount(raw.get("expected_payout_fees_covered")) if isinstance(raw, dict) else None
+            if covered is None or covered < 0:
+                problems.append(f"{where}: expected_payout_fees_covered must be an amount in whole cents (use 0.00 if none, and for refunds)")
+            expected.append({"amounts": amounts, "other": other if other is not None else ZERO,
+                             "covered": covered if covered is not None else ZERO})
         tests.append({"title": str(test.get("title") or f"Test {index}")[:80] if isinstance(test, dict) else f"Test {index}",
                       "events": events, "expected": expected})
     if problems:
@@ -374,6 +399,9 @@ def run_tests(code: str, party_names: list[str], tests: list[dict[str, Any]], ra
                 if want != got:
                     problems.append(f"Test {index} ('{test['title']}'), event {number} ({event['type']} {event['amount']}): "
                                     f"expected {party} to be {aud(want)} but the code gave {aud(got)}")
+            if Decimal(step["values"]["covered"]) != expected["covered"]:
+                problems.append(f"Test {index} ('{test['title']}'), event {number} ({event['type']} {event['amount']}): expected "
+                                f"payout fees covered {aud(expected['covered'])} but the code gave {aud(Decimal(step['values']['covered']))}")
             if Decimal(step["values"]["other"]) != expected["other"]:
                 problems.append(f"Test {index} ('{test['title']}'), event {number} ({event['type']} {event['amount']}): expected "
                                 f"held back / taken from reserve {aud(expected['other'])} but the code gave {aud(Decimal(step['values']['other']))}")

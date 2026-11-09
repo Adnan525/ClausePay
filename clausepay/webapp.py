@@ -2,10 +2,11 @@
 import os
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 
 import anthropic
 from dotenv import find_dotenv, load_dotenv
-from flask import Flask, jsonify, render_template, request, url_for
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from clausepay.accounts import load_accounts
@@ -13,8 +14,9 @@ from clausepay.contract_chat import AssistantError, ContractAssistant, scenario_
 from clausepay.contract_runner import PendingTransactionError, RunnerError
 from clausepay.contract_sim import MAX_SALE, ContractProblem, parse_scenario, simulate_scenario
 from clausepay.contract_store import ContractStore
-from clausepay.live import LiveService, LiveStore
+from clausepay.live import BackgroundWorker, LiveService, LiveStore
 from clausepay.orders import Order, OrderStore
+from clausepay.reports import ReportService, ReportWriter
 from clausepay.paypal_client import Json, PayPalClient, PayPalError
 
 MIN_AMOUNT = Decimal("1.00")
@@ -52,6 +54,7 @@ def create_app(
     store: OrderStore | None = None,
     contracts: ContractStore | None = None,
     assistant: ContractAssistant | None = None,
+    report_writer: ReportWriter | None = None,
 ) -> Flask:
     load_dotenv(find_dotenv(usecwd=True))
     app = Flask(__name__)
@@ -70,6 +73,16 @@ def create_app(
 
 
     live = LiveService(lambda: get_client(), live_store, contract_store.directory / "frozen")
+
+
+    def get_report_writer() -> ReportWriter:
+        if report_writer is not None:
+            return report_writer
+        key = os.getenv("claude_key", "").strip()  # without a key the reports use fixed wording, but are still written
+        return ReportWriter(anthropic.Anthropic(api_key=key, timeout=60.0) if key else None)
+
+
+    reports = ReportService(live, get_report_writer)
 
 
     def get_assistant() -> ContractAssistant:
@@ -113,8 +126,21 @@ def create_app(
 
 
     @app.get("/")
+    def home() -> Any:
+        """Once a contract is frozen the main app opens on the transactions; before that, on the contract."""
+        if live.contract_path() is not None:
+            return redirect(url_for("transactions_page"))
+        return render_template("contract.html", active="contract")
+
+
+    @app.get("/contract")
     def contract_page() -> str:
         return render_template("contract.html", active="contract")
+
+
+    @app.get("/transactions")
+    def transactions_page() -> str:
+        return render_template("transactions.html", active="transactions")
 
 
     @app.get("/accounts")
@@ -296,12 +322,31 @@ def create_app(
             return {"error": "could not verify"}, 502
         if not genuine:
             return {"error": "bad signature"}, 400
-        if orders.already_seen(str(event.get("id", ""))):
-            return {"duplicate": True}, 200
-        if event.get("event_type") == "PAYMENT.CAPTURE.COMPLETED":
-            related = event.get("resource", {}).get("supplementary_data", {}).get("related_ids", {})
-            return {"matched": orders.confirm_webhook(str(related.get("order_id", "")))}, 200
-        return {"ignored": event.get("event_type")}, 200
+        event_type, resource = event.get("event_type"), event.get("resource", {})
+        live_store.log("webhook", f"PayPal sent {event_type} ({event.get('id')}).")
+        first_time = not orders.already_seen(str(event.get("id", "")))
+        result: Json = {}
+        if event_type == "PAYMENT.CAPTURE.COMPLETED":
+            related = resource.get("supplementary_data", {}).get("related_ids", {})
+            try:  # every sale runs the contract; this is safe to repeat, so PayPal's retries do no harm
+                sale = live.ingest_capture(str(resource.get("id", "")), "webhook", related.get("order_id"))
+            except PayPalError:
+                return {"error": "could not read the payment from PayPal"}, 502  # PayPal will try again
+            except RunnerError as error:
+                live_store.log("attention", f"Could not run the contract for payment {resource.get('id')}: {error}")
+                sale = None
+            if sale is not None:
+                result["live"] = sale.status
+            if first_time:
+                result["matched"] = orders.confirm_webhook(str(related.get("order_id", "")))
+        elif event_type == "PAYMENT.CAPTURE.REFUNDED":
+            live_store.log("refund", f"PayPal reports a refund ({resource.get('id')}). Refunds made outside ClausePay are not "
+                                     "run through the contract.")
+        if not first_time:
+            result["duplicate"] = True
+        elif not result and event_type != "PAYMENT.CAPTURE.COMPLETED":
+            result["ignored"] = event_type
+        return result, 200
 
 
     # ---------- live sales: real sandbox sales that run the frozen contract ----------
@@ -315,7 +360,16 @@ def create_app(
     @app.get("/api/live")
     def live_state() -> Json:
         live.reconcile()
-        return live.public()
+        return {**live.public(), "log": list(reversed(live_store.entries())), "webhook_configured": bool(webhook_id()),
+                "journal": live.journal()}
+
+
+    @app.get("/api/transactions")
+    def transactions_state() -> Json:
+        live.reconcile()
+        data = live.public()
+        data["sales"] = [sale for sale in data["sales"] if sale["status"] != "created"]  # unpaid orders are not transactions
+        return data
 
 
     @app.post("/api/live/sales")
@@ -371,4 +425,6 @@ def create_app(
         return "ok", 200
 
 
+    if os.getenv("background_worker", "on").strip().lower() != "off":
+        BackgroundWorker([live.reconcile, reports.generate_pending], live_store).start()  # payouts settle even when nobody has a page open
     return app

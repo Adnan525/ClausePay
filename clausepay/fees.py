@@ -3,6 +3,7 @@
 Rates are the ones the PayPal sandbox charged during testing (2.4% + A$0.30 per sale). The
 percentage part is returned pro rata on a refund; the fixed part never is.
 """
+import os
 from decimal import ROUND_HALF_UP, Decimal
 
 CENT = Decimal("0.01")
@@ -23,3 +24,24 @@ def percentage_fee(amount: Decimal, rate: Decimal = DEFAULT_FEE_RATE) -> Decimal
 def sale_fee(amount: Decimal, rate: Decimal = DEFAULT_FEE_RATE, fixed: Decimal = DEFAULT_FIXED_FEE) -> Decimal:
     """The total fee PayPal takes on a sale of `amount`."""
     return percentage_fee(amount, rate) + fixed
+
+
+# PayPal charges the sender (the business account) a fee on every payout, on top of the amount sent.
+# The sandbox charged 2% with no cap; the published rate is 2% capped per payout. Both are settings
+# (environment variables `payout_fee_rate` and `payout_fee_cap`), read each time so a .env change applies.
+DEFAULT_PAYOUT_FEE_RATE = Decimal("0.02")
+
+
+def payout_fee_settings() -> tuple[Decimal, Decimal | None]:
+    """The payout fee rate and the per-payout cap (None means no cap)."""
+    rate = Decimal(os.getenv("payout_fee_rate", "").strip() or DEFAULT_PAYOUT_FEE_RATE)
+    cap = os.getenv("payout_fee_cap", "").strip()
+    return rate, (Decimal(cap) if cap else None)
+
+
+def payout_fee(amount: Decimal, rate: Decimal | None = None, cap: Decimal | None = None) -> Decimal:
+    """The fee PayPal charges the business for sending one payout of `amount`."""
+    default_rate, default_cap = payout_fee_settings()
+    fee = cents(amount * (default_rate if rate is None else rate))
+    limit = default_cap if cap is None else cap
+    return min(fee, limit) if limit is not None else fee
