@@ -102,6 +102,16 @@ def _decode(obj: dict[str, Any]) -> Any:
     return obj
 
 
+def to_json(value: Any) -> str:
+    """JSON text for `value` in which Decimals stay exact (used for state and journal files)."""
+    return json.dumps(value, default=_encode, indent=2)
+
+
+def from_json(text: str) -> Any:
+    """The inverse of to_json."""
+    return json.loads(text, object_hook=_decode)
+
+
 _RUNNER = r'''
 import builtins, json, sys
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP

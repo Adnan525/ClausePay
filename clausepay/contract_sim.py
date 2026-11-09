@@ -165,9 +165,16 @@ def _run(code: str, function: str, kwargs: dict[str, Any], where: str) -> Any:
 
 
 def _sale_step(code: str, parties: set[str], sale_id: str, amount: Decimal, state: dict[str, Any],
-               reserve: Decimal, rate: Decimal, fixed: Decimal, where: str) -> dict[str, Any]:
-    percentage = percentage_fee(amount, rate)
-    fee = percentage + fixed
+               reserve: Decimal, rate: Decimal, fixed: Decimal, where: str,
+               reported_fee: Decimal | None = None) -> dict[str, Any]:
+    """One sale. With `reported_fee` (what PayPal really kept) that is used; otherwise the fee is computed."""
+    if reported_fee is None:
+        percentage = percentage_fee(amount, rate)
+        fee = percentage + fixed
+        fee_line = f"PayPal keeps {aud(fee)}: {rate * 100:.1f}% of {aud(amount)} is {aud(percentage)}, plus {aud(fixed)} fixed."
+    else:
+        fee = reported_fee
+        fee_line = f"PayPal reported keeping {aud(fee)}."
     net = amount - fee
     result = _run(code, "calculate_payout", {"sale_id": sale_id, "sale_amount": amount, "paypal_fee": fee, "state": state}, where)
     new_state, notes = _clean_extras(result, where)
@@ -181,8 +188,7 @@ def _sale_step(code: str, parties: set[str], sale_id: str, amount: Decimal, stat
         raise ContractProblem([f"{where}: held_back_change {aud(held)} would release more than the reserve holds ({aud(reserve)})"])
     lines = [
         f"The buyer pays {aud(amount)} into the business account.",
-        f"PayPal keeps {aud(fee)}: {rate * 100:.1f}% of {aud(amount)} is {aud(percentage)}, plus {aud(fixed)} fixed. "
-        f"The business account receives {aud(net)}.",
+        f"{fee_line} The business account receives {aud(net)}.",
     ]
     lines += [f"{name} is paid {aud(value)}{_share(value, net, 'the business received')}." for name, value in payouts.items()]
     if not payouts:
@@ -201,8 +207,11 @@ def _sale_step(code: str, parties: set[str], sale_id: str, amount: Decimal, stat
 
 
 def _refund_step(code: str, parties: set[str], sale_id: str, amount: Decimal, state: dict[str, Any],
-                 reserve: Decimal, rate: Decimal, where: str) -> dict[str, Any]:
-    returned = percentage_fee(amount, rate)
+                 reserve: Decimal, rate: Decimal, where: str, reported_return: Decimal | None = None) -> dict[str, Any]:
+    """One refund. With `reported_return` (the fee PayPal really gave back) that is used; otherwise it is computed."""
+    returned = percentage_fee(amount, rate) if reported_return is None else reported_return
+    return_line = (f"PayPal returns {aud(returned)} of its fee ({percent(rate)} of {aud(amount)}); the fixed fee is not returned."
+                   if reported_return is None else f"PayPal reported returning {aud(returned)} of its fee; the fixed fee is not returned.")
     cost = amount - returned
     result = _run(code, "calculate_refund", {"sale_id": sale_id, "refund_amount": amount, "fee_returned": returned, "state": state}, where)
     new_state, notes = _clean_extras(result, where)
@@ -216,8 +225,7 @@ def _refund_step(code: str, parties: set[str], sale_id: str, amount: Decimal, st
         raise ContractProblem([f"{where}: from_holdback {aud(from_reserve)} is more than the reserve holds ({aud(reserve)})"])
     lines = [
         f"The buyer is refunded {aud(amount)} from the business account.",
-        f"PayPal returns {aud(returned)} of its fee ({percent(rate)} of {aud(amount)}); the fixed fee is not returned. "
-        f"The refund costs the business {aud(cost)}.",
+        f"{return_line} The refund costs the business {aud(cost)}.",
     ]
     if from_reserve > 0:
         lines.append(f"{aud(from_reserve)} is taken from the reserve (reserve is now {aud(reserve - from_reserve)}).")
@@ -231,6 +239,35 @@ def _refund_step(code: str, parties: set[str], sale_id: str, amount: Decimal, st
             "values": {"amounts": {name: str(value) for name, value in funding.items()}, "other": str(from_reserve)},
             "_state": new_state, "_reserve": reserve - from_reserve,
             "_totals": {"paid": ZERO, "fee": -returned, "refunded": amount, "payouts": {}, "funding": funding}}
+
+
+@dataclass(frozen=True)
+class StepOutcome:
+    """What the contract decided for one real sale or refund, after every rule has been checked."""
+    amounts: dict[str, Decimal]  # sale: what each party is paid; refund: what each party must transfer in
+    reserve_change: Decimal  # sale: + held back / - released; refund: - taken from the reserve
+    reserve_after: Decimal
+    state: dict[str, Any]
+    lines: list[str]
+    notes: list[str]
+
+
+def apply_sale(code: str, party_names: list[str], sale_id: str, amount: Decimal, paypal_fee: Decimal,
+               state: dict[str, Any], reserve: Decimal) -> StepOutcome:
+    """Run the contract on a real sale using PayPal's reported fee. Raises ContractProblem if any rule breaks."""
+    step = _sale_step(code, set(party_names), sale_id, amount, state, reserve, DEFAULT_FEE_RATE, DEFAULT_FIXED_FEE,
+                      f"Sale {sale_id}", reported_fee=paypal_fee)
+    return StepOutcome(step["_totals"]["payouts"], step["_reserve"] - reserve, step["_reserve"], step["_state"],
+                       step["lines"], step["notes"])
+
+
+def apply_refund(code: str, party_names: list[str], sale_id: str, amount: Decimal, fee_returned: Decimal,
+                 state: dict[str, Any], reserve: Decimal) -> StepOutcome:
+    """Run the contract on a real refund using the fee PayPal reported returning. Raises ContractProblem if a rule breaks."""
+    step = _refund_step(code, set(party_names), sale_id, amount, state, reserve, DEFAULT_FEE_RATE,
+                        f"Refund of sale {sale_id}", reported_return=fee_returned)
+    return StepOutcome(step["_totals"]["funding"], step["_reserve"] - reserve, step["_reserve"], step["_state"],
+                       step["lines"], step["notes"])
 
 
 def percent(rate: Decimal) -> str:
