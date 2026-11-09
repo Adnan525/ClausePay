@@ -430,3 +430,96 @@ def test_commenting_on_an_empty_slot_is_just_a_normal_message(client: FlaskClien
 def test_a_nonsense_scenario_number_is_refused(client: FlaskClient, claude: FakeClaude) -> None:
     ready(client, claude)
     assert client.post("/api/contract/message", json={"text": "hi", "scenario": "x"}).status_code == 400
+
+
+# ---------- live sales (routes) ----------
+
+@pytest.fixture
+def live_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[FlaskClient, Any]]:
+    from tests.test_contract_runner import RESERVE_CODE, freeze_files
+    from tests.test_live import FakePayPal as LivePayPal
+    monkeypatch.setenv("buyer_email", "buyer@example.com")
+    monkeypatch.setenv("paypal_webhook_id", "")
+    (tmp_path / "frozen").mkdir()
+    freeze_files(tmp_path / "frozen", RESERVE_CODE)
+    paypal = LivePayPal()
+    app = create_app(client=paypal, store=OrderStore(), contracts=ContractStore(tmp_path))  # type: ignore[arg-type]
+    yield app.test_client(), paypal
+
+
+def test_the_live_page_is_a_demo_helper_tab(client: FlaskClient) -> None:
+    page = client.get("/live").get_data(as_text=True)
+    assert "DEMO ONLY" in page and 'href="/live" class="helper active"' in page and "buyer@example.com" in page
+
+
+def test_live_has_nothing_to_show_without_a_frozen_contract(client: FlaskClient) -> None:
+    assert client.get("/api/live").get_json() == {"contract": None, "sales": []}
+    response = client.post("/api/live/sales", json={"amount": "100.00"})
+    assert response.status_code == 409 and "no frozen contract" in response.get_json()["error"]
+
+
+def test_an_unknown_live_order_is_not_captured(client: FlaskClient) -> None:
+    assert client.get("/live/return?token=NOPE").status_code == 404
+
+
+def test_a_whole_sale_and_refund_through_the_routes(live_client: tuple[FlaskClient, Any]) -> None:
+    client, paypal = live_client
+    created = client.post("/api/live/sales", json={"amount": "800.00"})
+    assert created.status_code == 201 and created.get_json()["approve_url"].startswith("https://paypal.test/")
+    order_id = created.get_json()["order_id"]
+    assert client.get("/api/live").get_json()["sales"][0]["status"] == "created"
+    returned = client.get(f"/live/return?token={order_id}")
+    assert returned.status_code == 200 and "window.close" in returned.get_data(as_text=True)
+    page = client.get("/api/live").get_json()
+    assert page["sales"][0]["status"] == "paying" and page["contract"]["pending"] == [f"sale:CAP-{order_id}"]
+    paypal.payout_status = "SUCCESS"
+    page = client.get("/api/live").get_json()
+    assert page["sales"][0]["status"] == "paid_out" and page["contract"]["reserve"] == "78.05"
+    assert page["contract"]["state"] == {"recouped": "500.00", "reserve": "78.05"}
+    refund = client.post(f"/api/live/sales/{order_id}/refund", json={"amount": "20.00", "request_id": "request-0001"})
+    assert refund.status_code == 200 and refund.get_json()["sale"]["refundable"] == "780.00"
+    assert client.post(f"/api/live/sales/{order_id}/refund", json={"amount": "20.00", "request_id": "request-0001"}).status_code == 200
+    assert len(paypal.refunds) == 1  # the repeated click did not refund again
+
+
+def test_refund_requests_are_validated(live_client: tuple[FlaskClient, Any]) -> None:
+    client, paypal = live_client
+    order_id = client.post("/api/live/sales", json={"amount": "100.00"}).get_json()["order_id"]
+    client.get(f"/live/return?token={order_id}")
+    paypal.payout_status = "SUCCESS"
+    client.get("/api/live")
+    url = f"/api/live/sales/{order_id}/refund"
+    assert client.post(url, json={"amount": "5.00"}).status_code == 400  # no request id
+    assert client.post(url, json={"amount": "5.00", "request_id": "x"}).status_code == 400  # too short to be safe
+    assert client.post(url, json={"amount": "abc", "request_id": "request-0001"}).status_code == 400
+    assert client.post(url, json={"amount": "-5", "request_id": "request-0001"}).status_code == 400
+    assert client.post(url, json={"amount": "5.005", "request_id": "request-0001"}).status_code == 400
+    assert client.post(url, json={"amount": "500.00", "request_id": "request-0002"}).status_code == 400  # more than the sale
+    assert client.post("/api/live/sales/NOPE/refund", json={"amount": "5.00", "request_id": "request-0003"}).status_code == 400
+    assert paypal.refunds == {}
+
+
+def test_a_big_refund_asks_for_confirmation_over_the_routes(live_client: tuple[FlaskClient, Any]) -> None:
+    client, paypal = live_client
+    order_id = client.post("/api/live/sales", json={"amount": "800.00"}).get_json()["order_id"]
+    client.get(f"/live/return?token={order_id}")
+    paypal.payout_status = "SUCCESS"
+    client.get("/api/live")
+    url = f"/api/live/sales/{order_id}/refund"
+    asked = client.post(url, json={"amount": "400.00", "request_id": "request-0001"}).get_json()
+    assert asked["needs_partner_transfer"]["transfers"] == {"Alice": "156.18", "Bob": "156.17"} and paypal.refunds == {}
+    done = client.post(url, json={"amount": "400.00", "request_id": "request-0001", "partners_confirmed": True})
+    assert done.status_code == 200 and len(paypal.refunds) == 1
+
+
+def test_a_cancelled_live_sale_disappears(live_client: tuple[FlaskClient, Any]) -> None:
+    client, _ = live_client
+    order_id = client.post("/api/live/sales", json={"amount": "100.00"}).get_json()["order_id"]
+    client.get(f"/live/cancel?token={order_id}")
+    assert client.get("/api/live").get_json()["sales"] == []
+
+
+def test_bad_live_sale_amounts_are_refused(live_client: tuple[FlaskClient, Any]) -> None:
+    client, paypal = live_client
+    assert client.post("/api/live/sales", json={"amount": "0.50"}).status_code == 400
+    assert paypal.orders == {}

@@ -148,6 +148,11 @@ class ContractRunner:
         return [entry for entry in journal["entries"] if entry["status"] != "failed"]
 
 
+    def _refunded(self, journal: dict[str, Any], sale_id: str) -> Decimal:
+        return sum((entry["amount"] for entry in self._live(journal)
+                    if entry["kind"] == "refund" and entry["sale_id"] == sale_id), ZERO)
+
+
     @staticmethod
     def _find(journal: dict[str, Any], entry_id: str) -> dict[str, Any] | None:
         return next((entry for entry in journal["entries"] if entry["entry_id"] == entry_id and entry["status"] != "failed"), None)
@@ -215,8 +220,7 @@ class ContractRunner:
             sale = self._find(journal, f"sale:{sale_id}")
             if sale is None:
                 raise InvalidTransactionError(f"Sale {sale_id} is not in this contract's journal")
-            already = sum((entry["amount"] for entry in self._live(journal)
-                           if entry["kind"] == "refund" and entry["sale_id"] == sale_id), ZERO)
+            already = self._refunded(journal, sale_id)
             if amount <= 0 or amount > sale["amount"] - already:
                 raise InvalidTransactionError(f"Only {sale['amount'] - already} of sale {sale_id} is left to refund")
             expected = percentage_fee(amount, self.rate)
@@ -228,6 +232,42 @@ class ContractRunner:
             except ContractProblem as problem:
                 raise ContractFailedError(" ".join(problem.problems)) from None
             return self._record(journal, entry_id, "refund", sale_id, amount, returned, outcome)
+
+
+    def refundable(self, sale_id: str) -> Decimal:
+        """How much of a sale can still be refunded: the sale amount minus every refund already counted."""
+        with self._lock:
+            _, digest = self._verified_code()
+            journal = self._load_journal(digest)
+            sale = self._find(journal, f"sale:{sale_id}")
+            if sale is None:
+                raise InvalidTransactionError(f"Sale {sale_id} is not in this contract's journal")
+            return sale["amount"] - self._refunded(journal, sale_id)
+
+
+    def quote_refund(self, sale_id: str, refund_amount: Decimal) -> Transaction:
+        """What the contract would decide for a refund, without recording anything (status "quote").
+
+        The returned fee is assumed to be the expected one; `process_refund` later checks PayPal's real figure.
+        """
+        with self._lock:
+            code, digest = self._verified_code()
+            journal = self._load_journal(digest)
+            self._require_nothing_pending(journal)
+            amount = _require_money(refund_amount, "The refund amount")
+            sale = self._find(journal, f"sale:{sale_id}")
+            if sale is None:
+                raise InvalidTransactionError(f"Sale {sale_id} is not in this contract's journal")
+            left = sale["amount"] - self._refunded(journal, sale_id)
+            if amount <= 0 or amount > left:
+                raise InvalidTransactionError(f"Only {left} of sale {sale_id} is left to refund")
+            state, reserve = self._current(journal)
+            try:
+                outcome = apply_refund(code, self.parties, sale_id, amount, percentage_fee(amount, self.rate), state, reserve)
+            except ContractProblem as problem:
+                raise ContractFailedError(" ".join(problem.problems)) from None
+            return Transaction(f"quote:{sale_id}", "refund", "quote", False, outcome.amounts, outcome.reserve_change,
+                               outcome.reserve_after, outcome.state, outcome.lines, outcome.notes)
 
 
     @staticmethod

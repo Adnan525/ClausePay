@@ -10,8 +10,10 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from clausepay.accounts import load_accounts
 from clausepay.contract_chat import AssistantError, ContractAssistant, scenario_context
-from clausepay.contract_sim import ContractProblem, parse_scenario, simulate_scenario
+from clausepay.contract_runner import PendingTransactionError, RunnerError
+from clausepay.contract_sim import MAX_SALE, ContractProblem, parse_scenario, simulate_scenario
 from clausepay.contract_store import ContractStore
+from clausepay.live import LiveService, LiveStore
 from clausepay.orders import Order, OrderStore
 from clausepay.paypal_client import Json, PayPalClient, PayPalError
 
@@ -19,16 +21,29 @@ MIN_AMOUNT = Decimal("1.00")
 MAX_AMOUNT = Decimal("500.00")
 
 
-def parse_amount(text: object) -> Decimal:
-    """A demo purchase amount in whole cents between MIN_AMOUNT and MAX_AMOUNT."""
+def parse_amount(text: object, maximum: Decimal = MAX_AMOUNT) -> Decimal:
+    """A demo purchase amount in whole cents between MIN_AMOUNT and `maximum`."""
     try:
         amount = Decimal(str(text).strip())
     except InvalidOperation:
         raise ValueError("Enter an amount like 25.00")
     if not amount.is_finite() or amount != amount.quantize(Decimal("0.01")):
         raise ValueError("Use whole cents, like 25.00")
-    if not MIN_AMOUNT <= amount <= MAX_AMOUNT:
-        raise ValueError(f"Demo amounts are between {MIN_AMOUNT} and {MAX_AMOUNT}")
+    if not MIN_AMOUNT <= amount <= maximum:
+        raise ValueError(f"Demo amounts are between {MIN_AMOUNT} and {maximum}")
+    return amount
+
+
+def parse_refund_amount(text: object) -> Decimal | None:
+    """A refund amount in whole cents, or None for "the whole remaining amount"."""
+    if text is None or str(text).strip() == "":
+        return None
+    try:
+        amount = Decimal(str(text).strip())
+    except InvalidOperation:
+        raise ValueError("Enter an amount like 25.00, or leave it empty to refund what is left")
+    if not amount.is_finite() or amount <= 0 or amount != amount.quantize(Decimal("0.01")):
+        raise ValueError("A refund must be a positive amount in whole cents")
     return amount
 
 
@@ -45,12 +60,16 @@ def create_app(
     contract_store = contracts or ContractStore(Path(os.getenv("data_dir", "data")))
     paypal: list[PayPalClient] = [client] if client else []
     claude: list[ContractAssistant] = [assistant] if assistant else []
+    live_store = LiveStore(contract_store.directory / "live.json")
 
 
     def get_client() -> PayPalClient:
         if not paypal:
             paypal.append(PayPalClient())
         return paypal[0]
+
+
+    live = LiveService(lambda: get_client(), live_store, contract_store.directory / "frozen")
 
 
     def get_assistant() -> ContractAssistant:
@@ -283,6 +302,68 @@ def create_app(
             related = event.get("resource", {}).get("supplementary_data", {}).get("related_ids", {})
             return {"matched": orders.confirm_webhook(str(related.get("order_id", "")))}, 200
         return {"ignored": event.get("event_type")}, 200
+
+
+    # ---------- live sales: real sandbox sales that run the frozen contract ----------
+
+    @app.get("/live")
+    def live_page() -> str:
+        buyer = next(account for account in load_accounts() if account.label == "Buyer")
+        return render_template("live.html", buyer=buyer, active="live", min_amount=MIN_AMOUNT, max_amount=MAX_AMOUNT)
+
+
+    @app.get("/api/live")
+    def live_state() -> Json:
+        live.reconcile()
+        return live.public()
+
+
+    @app.post("/api/live/sales")
+    def live_create_sale() -> tuple[Json, int]:
+        try:
+            amount = parse_amount((request.get_json(silent=True) or {}).get("amount"), MAX_SALE)
+        except ValueError as error:
+            return {"error": str(error)}, 400
+        try:
+            sale = live.create_sale(amount, url_for("live_return", _external=True), url_for("live_cancel", _external=True))
+        except RunnerError as error:
+            return {"error": str(error)}, 409
+        except PayPalError as error:
+            return {"error": f"PayPal refused the order ({error.status})"}, 502
+        return {"order_id": sale.order_id, "approve_url": sale.approve_url}, 201
+
+
+    @app.get("/live/return")
+    def live_return() -> tuple[str, int]:
+        order_id = request.args.get("token", "")
+        if live_store.get(order_id) is None:
+            return render_template("closing.html", message="We don't know this order.", order_id=""), 404
+        live.handle_return(order_id)
+        return render_template("closing.html", message="Payment approved. You can close this tab.", order_id=order_id), 200
+
+
+    @app.get("/live/cancel")
+    def live_cancel() -> tuple[str, int]:
+        order_id = request.args.get("token", "")
+        live.handle_cancel(order_id)
+        return render_template("closing.html", message="Payment cancelled. You can close this tab.", order_id=order_id), 200
+
+
+    @app.post("/api/live/sales/<order_id>/refund")
+    def live_refund(order_id: str) -> tuple[Json, int]:
+        body = request.get_json(silent=True) or {}
+        request_id = str(body.get("request_id", "")).strip()
+        if not 8 <= len(request_id) <= 64:
+            return {"error": "A refund needs a request id so that a double click cannot refund twice."}, 400
+        try:
+            amount = parse_refund_amount(body.get("amount"))
+            return live.refund(order_id, amount, request_id, bool(body.get("partners_confirmed"))), 200
+        except ValueError as error:
+            return {"error": str(error)}, 400
+        except PendingTransactionError as error:
+            return {"error": str(error)}, 409
+        except RunnerError as error:
+            return {"error": str(error)}, 400
 
 
     @app.get("/health")
