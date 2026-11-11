@@ -1,9 +1,3 @@
-"""Safe checking and running of Claude-generated contract code.
-
-Two layers: a static check that rejects dangerous constructs before anything runs, and a
-separate locked-down Python process (restricted builtins, CPU and memory limits, time limit)
-that executes one function call. Money crosses the process boundary as exact Decimals.
-"""
 import ast
 import json
 import subprocess

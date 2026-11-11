@@ -1,8 +1,3 @@
-"""Live PayPal sandbox checks. Run: .venv/bin/python scripts/sandbox_check.py
-
-Each check is independent and prints PayPal's raw answer, so we can see what the
-sandbox actually supports. Nothing here prints credentials.
-"""
 import json
 import os
 import sys

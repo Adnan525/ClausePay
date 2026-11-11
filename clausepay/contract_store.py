@@ -1,8 +1,3 @@
-"""The contract being built: chat history, the draft code, approvals, and the frozen result.
-
-One contract at a time for now (no separate users yet). The record is saved as JSON under
-`data/` after every change, and frozen code is written to its own read-only file.
-"""
 import hashlib
 import json
 import os

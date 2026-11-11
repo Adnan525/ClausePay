@@ -1,12 +1,3 @@
-"""Payout and refund reports for the partners.
-
-Two layers, so a wrong number is impossible:
-  1. ClausePay builds every figure from the contract's journal (amounts, fees, reserve, state before and after)
-     and a plain list of what changed.
-  2. Claude writes only the explanation. It is never shown a number and must use {placeholders}; ClausePay fills
-     them in and rejects any text that contains a number of its own.
-One report goes to every party. Sending the email is simulated for now: the report is stored and marked "sent".
-"""
 import json
 import re
 from datetime import datetime, timezone

@@ -4,6 +4,12 @@ ClausePay splits sales money between partners according to a contract written in
 
 **This is a hackathon demo. It only talks to the PayPal sandbox, so no real money moves.**
 
+## Tech Stack
+- Python 3.15
+- PapyPal API
+- Anthropic Claude Sonnet 5.5
+- Render Web Service
+
 ## How it works, in short
 
 1. You write the contract as normal text ("Alice invested $500 and gets paid back first, then 60/40...").
@@ -175,14 +181,12 @@ Everything is plain JSON or Python under `data/` (git-ignored). Writes go to a t
 - **Wallet safety.** A wallet is only saved if the PayPal account that approved it has the partner's own email. Charges are tagged so they are never mistaken for sales.
 - **Secrets** come only from environment variables. Passwords aren't used at all, and the wallet file is created with owner-only permissions.
 
-### Known limits
+### Known limits for MVP
 
 - Sandbox only. The sandbox fees (2.4% + A$0.30 per sale, 2% per payout) differ from PayPal's published rates, so treat them as settings.
 - One contract and one user at a time.
-- The payout fee is paid by the business, so the contract has to say who ends up bearing it.
 - Wallet tokens are stored in a plain file, which is fine for a demo and not for production.
 - Not handled: disputes and chargebacks, and refunds made outside ClausePay (they are only logged).
-- A sale whose buyer closes PayPal before coming back is only caught if the webhook is set up.
 
 ### Project layout
 

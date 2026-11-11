@@ -1,9 +1,3 @@
-"""Dry-run a generated contract: arithmetic only, no PayPal calls, no balances touched.
-
-Claude supplies the contract code and the scenario inputs (sale and refund amounts). Everything
-else here is static code: fees, conservation checks, and the plain-English explanation of each
-step. If the contract breaks a rule, the problem is reported instead of being shown as a result.
-"""
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any

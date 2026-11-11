@@ -1,4 +1,3 @@
-"""ClausePay demo web app. Demo only: PayPal sandbox, no real money."""
 import os
 from decimal import Decimal, InvalidOperation
 from pathlib import Path

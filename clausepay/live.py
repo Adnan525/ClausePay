@@ -1,14 +1,3 @@
-"""Live (sandbox) sales that really run a frozen contract.
-
-The flow for a sale: the buyer pays through PayPal, ClausePay captures the payment, the contract
-runner decides who gets what (recorded as pending), the partners are paid through PayPal Payouts,
-and only when PayPal confirms the payout does the runner commit and move the contract's memory
-forward. A refund goes through the same runner, can only take from what is left of its sale, and
-is safe to repeat (same request id means the same refund).
-
-Demo shortcuts, clearly shown to the user: when a refund needs partners to transfer money in,
-the user confirms that the transfer happened (ClausePay does not charge their wallets yet).
-"""
 import hashlib
 import json
 import os

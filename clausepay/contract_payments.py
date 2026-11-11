@@ -1,10 +1,3 @@
-"""Contract-driven money movement.
-
-ClausePay generates one subclass per contract. The subclass only answers two
-questions (who gets what from a sale, who funds what for a refund). Everything
-else, including validating those answers and talking to PayPal, is static code
-here, so a bad generated function is caught before any money moves.
-"""
 from abc import ABC, abstractmethod
 from decimal import Decimal
 

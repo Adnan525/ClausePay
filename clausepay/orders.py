@@ -1,7 +1,3 @@
-"""In-memory record of the orders the demo creates, and what PayPal reported for each.
-
-Demo only: nothing is persisted, so a restart forgets every order.
-"""
 import threading
 from dataclasses import dataclass
 from decimal import Decimal

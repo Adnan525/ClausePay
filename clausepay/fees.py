@@ -1,8 +1,3 @@
-"""PayPal fee arithmetic. Pure functions, so contract simulations need no PayPal credentials.
-
-Rates are the ones the PayPal sandbox charged during testing (2.4% + A$0.30 per sale). The
-percentage part is returned pro rata on a refund; the fixed part never is.
-"""
 import os
 from decimal import ROUND_HALF_UP, Decimal
 

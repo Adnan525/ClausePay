@@ -1,8 +1,3 @@
-"""The sandbox accounts ClausePay knows about, with the labels the dashboard shows.
-
-PayPal sandbox names are all "John Doe", so labels live here instead. Only
-emails are read from the environment; passwords are never loaded by the app.
-"""
 import os
 from dataclasses import dataclass
 

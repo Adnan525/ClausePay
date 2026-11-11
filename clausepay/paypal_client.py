@@ -1,8 +1,3 @@
-"""Thin wrapper around PayPal's REST API (sandbox by default).
-
-Every public method does exactly one PayPal call. The wrapper never decides an
-amount: it only sends what it is given, formatted as whole cents.
-"""
 import os
 import time
 import uuid
@@ -53,7 +48,7 @@ class PayPalClient:
         self._token_expires_at = 0.0
 
 
-    # ---- plumbing -------------------------------------------------------
+    
 
     def _fetch_token(self) -> tuple[str, float]:
         response = requests.post(
@@ -129,7 +124,7 @@ class PayPalClient:
         return {"currency_code": self.currency, "value": self._format_amount(amount)}
 
 
-    # ---- account checks -------------------------------------------------
+    
 
     def get_balances(self) -> Json:
         """Raw balances for the business account (needs the Balances feature)."""
@@ -149,8 +144,6 @@ class PayPalClient:
         params = {"start_date": start_date, "end_date": end_date, "fields": "all"}
         return self._request("GET", "/v1/reporting/transactions", params=params)
 
-
-    # ---- sales (money in) -----------------------------------------------
 
     def create_order(
         self,
@@ -207,8 +200,6 @@ class PayPalClient:
         return self._request("GET", f"/v2/payments/captures/{capture_id}")
 
 
-    # ---- refunds (money out to buyer) -----------------------------------
-
     def refund_capture(
         self,
         capture_id: str,
@@ -233,9 +224,7 @@ class PayPalClient:
     def get_refund(self, refund_id: str) -> Json:
         """A refund, including seller_payable_breakdown (gross, fee returned, net)."""
         return self._request("GET", f"/v2/payments/refunds/{refund_id}")
-
-
-    # ---- payouts (money out to partners) --------------------------------
+    
 
     def send_payouts(self, payments: dict[str, Decimal], note: str = "ClausePay payout") -> Json:
         """Send a batch of {email: amount}. Returns the batch header."""
@@ -261,8 +250,6 @@ class PayPalClient:
         """A payout batch with per-item status and the fee charged."""
         return self._request("GET", f"/v1/payments/payouts/{payout_batch_id}")
 
-
-    # ---- vault (partner approves once, ClausePay charges later) ---------
 
     def create_vault_setup_token(self, return_url: str, cancel_url: str) -> Json:
         """Start saving a partner's PayPal wallet. Send them to the returned approve link."""
@@ -299,7 +286,7 @@ class PayPalClient:
         return self.capture_order(order["id"], request_id=f"{request_id}:capture" if request_id else None)
 
 
-    # ---- webhooks -------------------------------------------------------
+    
 
     def verify_webhook(self, webhook_id: str, headers: dict[str, str], event: Json) -> bool:
         """Ask PayPal whether a received webhook is genuine. `headers` are the request headers."""

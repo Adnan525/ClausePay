@@ -1,9 +1,3 @@
-"""The conversation with Claude that turns a plain-English contract into the two payout functions.
-
-Claude answers every turn with JSON that matches RESPONSE_SCHEMA: either a question for the user
-or, once nothing is ambiguous, the finished contract (summary, parties, code, three scenarios).
-Static code then checks and dry-runs that submission; failures go back to Claude to fix.
-"""
 import json
 from typing import Any
 

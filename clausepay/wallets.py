@@ -1,10 +1,3 @@
-"""Partners' saved PayPal wallets, so their share of a refund can be collected automatically.
-
-Each partner approves ClausePay once (a PayPal approval page opened from a button, like a sale). PayPal then
-gives ClausePay a token it can use to charge that wallet later without any clicks. ClausePay stores that token
-(demo: in a JSON file under data/, never in git) and checks that the approving PayPal account really is the
-partner's own email before accepting it.
-"""
 import json
 import os
 import threading

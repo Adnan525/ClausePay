@@ -1,11 +1,3 @@
-"""Runs a frozen contract on real sales and refunds, and remembers what it has done.
-
-The generated functions stay pure: they remember nothing. This runner owns the memory. For one
-frozen contract it keeps a journal file (next to the frozen code) with one entry per sale or
-refund. Before every run it re-hashes the code and refuses to run if the code changed, ignores
-a sale it has already seen, and only moves the contract's state forward once the payout is
-confirmed. Every contract has its own code, journal and state; nothing is shared.
-"""
 import hashlib
 import json
 import os
