@@ -1,6 +1,8 @@
 # ClausePay
 
-ClausePay splits sales money between partners according to a contract written in plain English, and handles refunds the same way. You describe the deal in a chat, an AI turns it into code, you check that code against your own examples, and from then on every sale that comes in is divided and paid out automatically.
+ClausePay splits sales money between partners according to a contract written in plain English, and handles refunds the same way. You describe the deal in a chat, an AI turns it into code, you check that code against your own examples, and from then on every sale that comes in is divided and paid out automatically.  
+**We have a hosted version for judges to try at** https://clausepay.onrender.com  
+The hosted version includes claude api key which is set to expire on 23rd November with $5 AUD left. Please follow the readme to host the program with your own API key and sandbox credentials.
 
 **This is a hackathon demo. It only talks to the PayPal sandbox, so no real money moves.**
 
