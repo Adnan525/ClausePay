@@ -92,7 +92,7 @@ from the reserve first; if it isn't enough, Alice and Bob each cover half of wha
 Alice's recoupment, and partial refunds are allowed.
 ```
 
-### Deploying on Render
+### Deploying on Render (Recommended and tested)
 
 Create a Web Service from the repo. Build command `pip install -r requirements.txt`, start command:
 
@@ -102,7 +102,7 @@ gunicorn --workers 1 --threads 4 --timeout 180 "clausepay.webapp:create_app()"
 
 Use one worker on purpose: a background thread, in-memory state and file locks all live inside the process. The long timeout is for Claude, which can take a minute when it writes code. In the service's **Environment** settings, add the same variables as in `.env` (except any passwords). The health check path is `/health`.
 
-**Webhooks.** For ClausePay to see sales that PayPal reports, register `https://<your-app>.onrender.com/webhooks/paypal` in your sandbox app for the `PAYMENT.CAPTURE.COMPLETED` event, then put the Webhook ID it shows into `paypal_webhook_id`. Without it, sales started from the Live sales page still work, because they run when the buyer returns from PayPal. A paid sale arrives twice (return and webhook) and is only ever processed once.
+**Webhooks.** For ClausePay to see sales that PayPal reports, register `https://clausepay.onrender.com/webhooks/paypal` in your sandbox app for the `PAYMENT.CAPTURE.COMPLETED` event, then put the Webhook ID it shows into `paypal_webhook_id`. Without it, sales started from the Live sales page still work, because they run when the buyer returns from PayPal. A paid sale arrives twice (return and webhook) and is only ever processed once.
 
 On Render's free plan the disk is wiped on every redeploy and when the service sleeps, so freeze a contract on the Render copy itself and expect to redo it after a redeploy.
 
