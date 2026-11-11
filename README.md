@@ -208,3 +208,22 @@ clausepay/
   contract_payments.py  an early sketch that the runner replaced; not used by the app
 tests/                  pytest suite
 ```
+
+## Screenshots
+Contract home:\
+![home](figures/home.png)
+
+Reading contract:\
+![reading](figures/reading_contract.png)
+
+Refine:\
+![refine](figures/refining_contract.png)
+
+Review and approve:\
+![approve](figures/review_approve.png)
+
+Scenario 1 (Sale):\
+![s1](figures/s1.png)
+
+Scenario 3 (Refund):\
+![s3](figures/s3.png)
